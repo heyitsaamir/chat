@@ -78,6 +78,12 @@ const bot = new Chat({
 });
 ```
 
+## Markdown healing
+
+During streaming, chunks often arrive mid-word or mid-syntax — for example, `**bold` before the closing `**` arrives. The SDK automatically heals incomplete markdown in intermediate renders using [remend](https://www.npmjs.com/package/remend), so messages always display with correct formatting while streaming.
+
+The final message uses the raw accumulated text without healing, so the original markdown is preserved.
+
 ## Table buffering
 
 When streaming content that contains GFM tables (e.g. from an LLM), the SDK automatically buffers potential table headers until a separator line (`|---|---|`) confirms them. This prevents tables from briefly flashing as raw pipe-delimited text before the table structure is complete.
