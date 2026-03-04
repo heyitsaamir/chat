@@ -307,18 +307,53 @@ export interface Adapter<TThreadId = unknown, TRawMessage = unknown> {
    * The adapter consumes the async iterable and handles the entire streaming lifecycle.
    * Only available on platforms with native streaming support (e.g., Slack).
    *
+   * The stream can yield plain strings (text chunks) or {@link StreamChunk} objects
+   * for rich content like task progress cards. Adapters that don't support structured
+   * chunks will extract text from `markdown_text` chunks and ignore other types.
+   *
    * @param threadId - The thread to stream to
-   * @param textStream - Async iterable of text chunks (e.g., from AI SDK)
+   * @param textStream - Async iterable of text chunks or structured StreamChunk objects
    * @param options - Platform-specific streaming options
    * @returns The raw message after streaming completes
    */
   stream?(
     threadId: string,
-    textStream: AsyncIterable<string>,
+    textStream: AsyncIterable<string | StreamChunk>,
     options?: StreamOptions
   ): Promise<RawMessage<TRawMessage>>;
   /** Bot username (can override global userName) */
   readonly userName: string;
+}
+
+/**
+ * A structured streaming chunk for platform-native rich content.
+ *
+ * On Slack, these map directly to streaming chunk types:
+ * - `markdown_text`: Streamed text content
+ * - `task_update`: Tool/step progress cards (pending → in_progress → complete → error)
+ * - `plan_update`: Plan title updates
+ *
+ * Adapters that don't support structured chunks will extract `text` from
+ * `markdown_text` chunks and ignore other types gracefully.
+ */
+export type StreamChunk = MarkdownTextChunk | TaskUpdateChunk | PlanUpdateChunk;
+
+export interface MarkdownTextChunk {
+  text: string;
+  type: "markdown_text";
+}
+
+export interface TaskUpdateChunk {
+  id: string;
+  output?: string;
+  status: "pending" | "in_progress" | "complete" | "error";
+  title: string;
+  type: "task_update";
+}
+
+export interface PlanUpdateChunk {
+  title: string;
+  type: "plan_update";
 }
 
 /**
@@ -332,6 +367,12 @@ export interface StreamOptions {
   recipientUserId?: string;
   /** Block Kit elements to attach when stopping the stream (Slack only, via chat.stopStream) */
   stopBlocks?: unknown[];
+  /**
+   * Slack: Controls how task_update chunks are displayed.
+   * - `"timeline"` — individual task cards shown inline with text (default)
+   * - `"plan"` — all tasks grouped into a single plan block
+   */
+  taskDisplayMode?: "timeline" | "plan";
   /** Minimum interval between updates in ms (default: 1000). Used for fallback mode (GChat/Teams). */
   updateIntervalMs?: number;
 }
@@ -1016,7 +1057,7 @@ export type AdapterPostableMessage =
  */
 export type PostableMessage =
   | AdapterPostableMessage
-  | AsyncIterable<string | StreamEvent>;
+  | AsyncIterable<string | StreamChunk | StreamEvent>;
 
 /**
  * Duck-typed stream event compatible with AI SDK's `fullStream`.

@@ -25,6 +25,8 @@ import type {
   PostEphemeralOptions,
   SentMessage,
   StateAdapter,
+  StreamChunk,
+  StreamEvent,
   StreamOptions,
   Thread,
 } from "./types";
@@ -90,7 +92,7 @@ const THREAD_STATE_KEY_PREFIX = "thread-state:";
  */
 function isAsyncIterable(
   value: unknown
-): value is AsyncIterable<string | import("./types").StreamEvent> {
+): value is AsyncIterable<string | StreamChunk | StreamEvent> {
   return (
     value !== null && typeof value === "object" && Symbol.asyncIterator in value
   );
@@ -415,9 +417,9 @@ export class ThreadImpl<TState = Record<string, unknown>>
    * then uses adapter's native streaming if available, otherwise falls back to post+edit.
    */
   private async handleStream(
-    rawStream: AsyncIterable<string | import("./types").StreamEvent>
+    rawStream: AsyncIterable<string | StreamChunk | StreamEvent>
   ): Promise<SentMessage> {
-    // Normalize: handles both plain string streams and AI SDK fullStream objects
+    // Normalize: handles plain strings, AI SDK fullStream events, and StreamChunk objects
     const textStream = fromFullStream(rawStream);
     // Build streaming options from current message context
     const options: StreamOptions = {};
@@ -433,16 +435,23 @@ export class ThreadImpl<TState = Record<string, unknown>>
 
     // Use native streaming if adapter supports it
     if (this.adapter.stream) {
-      // Wrap stream to collect accumulated text while passing through to adapter
+      // Wrap stream to collect accumulated text while passing through to adapter.
+      // StreamChunk objects are passed through; only plain strings are accumulated.
       let accumulated = "";
-      const wrappedStream: AsyncIterable<string> = {
+      const wrappedStream: AsyncIterable<string | StreamChunk> = {
         [Symbol.asyncIterator]: () => {
           const iterator = textStream[Symbol.asyncIterator]();
           return {
             async next() {
               const result = await iterator.next();
               if (!result.done) {
-                accumulated += result.value;
+                const value = result.value;
+                if (typeof value === "string") {
+                  accumulated += value;
+                } else if (value.type === "markdown_text") {
+                  accumulated += value.text;
+                }
+                // task_update and plan_update chunks don't contribute to accumulated text
               }
               return result;
             },
@@ -458,8 +467,32 @@ export class ThreadImpl<TState = Record<string, unknown>>
       );
     }
 
-    // Fallback: post + edit with throttling
-    return this.fallbackStream(textStream, options);
+    // Fallback: post + edit with throttling.
+    // Extract only text content from the mixed stream for adapters without native streaming.
+    const textOnlyStream: AsyncIterable<string> = {
+      [Symbol.asyncIterator]: () => {
+        const iterator = textStream[Symbol.asyncIterator]();
+        return {
+          async next(): Promise<IteratorResult<string>> {
+            while (true) {
+              const result = await iterator.next();
+              if (result.done) {
+                return { value: undefined as unknown as string, done: true };
+              }
+              const value = result.value;
+              if (typeof value === "string") {
+                return { value, done: false };
+              }
+              if (value.type === "markdown_text") {
+                return { value: value.text, done: false };
+              }
+              // Skip non-text chunks (task_update, plan_update) in fallback mode
+            }
+          },
+        };
+      },
+    };
+    return this.fallbackStream(textOnlyStream, options);
   }
 
   async startTyping(status?: string): Promise<void> {
