@@ -72,37 +72,20 @@ type ChatMessageListResponse = Awaited<
 >;
 type GraphMessage = NonNullable<ChatMessageListResponse["value"]>[number];
 
-/** Federated (workload identity) authentication config */
-export interface TeamsAuthFederated {
-  /** Audience for the federated credential (defaults to api://AzureADTokenExchange) */
-  clientAudience?: string;
-  /** Client ID for the managed identity assigned to the bot */
-  clientId: string;
-}
-
-export interface TeamsAdapterConfig {
-  /** Microsoft App ID. Defaults to TEAMS_APP_ID env var. */
-  appId?: string;
-  /** Microsoft App Password. Defaults to TEAMS_APP_PASSWORD env var. */
-  appPassword?: string;
-  /** Microsoft App Tenant ID. Defaults to TEAMS_APP_TENANT_ID env var. */
-  appTenantId?: string;
-  /** Microsoft App Type */
-  appType?: "MultiTenant" | "SingleTenant";
-  /** Federated (workload identity) authentication */
-  federated?: TeamsAuthFederated;
+export type TeamsAdapterConfig = Pick<
+  AppOptions<IPlugin>,
+  | "clientId"
+  | "clientSecret"
+  | "tenantId"
+  | "token"
+  | "managedIdentityClientId"
+  | "serviceUrl"
+> & {
   /** Logger instance for error reporting. Defaults to ConsoleLogger. */
   logger?: Logger;
-  /** Managed identity client ID for authentication */
-  managedIdentityClientId?: "system" | (string & {});
-  /** Custom token provider for authentication */
-  token?: (
-    scope: string | string[],
-    tenantId?: string
-  ) => string | Promise<string>;
   /** Override bot username (optional) */
   userName?: string;
-}
+};
 
 /** Teams-specific thread ID data */
 export interface TeamsThreadId {
@@ -128,81 +111,25 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
   private readonly formatConverter = new TeamsFormatConverter();
-  private readonly config: Required<Pick<TeamsAdapterConfig, "appId">> &
-    TeamsAdapterConfig;
+  private readonly config: TeamsAdapterConfig;
 
   /** Request-scoped webhook options for passing waitUntil to handlers */
   private currentWebhookOptions: WebhookOptions | undefined;
 
   constructor(config: TeamsAdapterConfig = {}) {
-    const appId = config.appId ?? process.env.CLIENT_ID;
-    if (!appId) {
-      throw new ValidationError(
-        "teams",
-        "appId is required. Set TEAMS_APP_ID or provide it in config."
-      );
-    }
-    const hasExplicitAuth =
-      config.appPassword || config.federated || config.token;
-    const appPassword = hasExplicitAuth
-      ? config.appPassword
-      : (config.appPassword ?? process.env.CLIENT_SECRET);
-    const appTenantId = config.appTenantId ?? process.env.TENANT_ID;
-
-    this.config = {
-      ...config,
-      appId,
-      appPassword,
-      appTenantId,
-    };
+    this.config = config;
     this.logger = config.logger ?? new ConsoleLogger("info").child("teams");
     this.userName = config.userName || "bot";
-
-    const authMethodCount = [
-      appPassword,
-      config.federated,
-      config.token,
-      config.managedIdentityClientId,
-    ].filter(Boolean).length;
-
-    if (authMethodCount === 0) {
-      throw new ValidationError(
-        "teams",
-        "One of appPassword, federated, token, or managedIdentityClientId must be provided"
-      );
-    }
-
-    if (authMethodCount > 1) {
-      throw new ValidationError(
-        "teams",
-        "Only one of appPassword, federated, token, or managedIdentityClientId can be provided"
-      );
-    }
-
-    if (config.appType === "SingleTenant" && !appTenantId) {
-      throw new ValidationError(
-        "teams",
-        "appTenantId is required for SingleTenant app type"
-      );
-    }
 
     // Create the BridgeHttpAdapter for serverless dispatch
     this.bridgeAdapter = new BridgeHttpAdapter();
 
-    // Build TeamsSDK App options
-    const appOptions: AppOptions<IPlugin> = {
-      clientId: appId,
-      clientSecret: appPassword || undefined,
-      tenantId: appTenantId || undefined,
-      token: config.token,
-      managedIdentityClientId:
-        config.managedIdentityClientId ??
-        (config.federated ? config.federated.clientId : undefined),
+    // Pass config through to App — it resolves CLIENT_ID, CLIENT_SECRET, TENANT_ID from env
+    const { logger: _logger, userName: _userName, ...appConfig } = config;
+    this.app = new App({
+      ...appConfig,
       httpServerAdapter: this.bridgeAdapter,
-      serviceUrl: process.env.SERVICE_URL,
-    };
-
-    this.app = new App(appOptions);
+    });
   }
 
   /**
@@ -332,8 +259,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       (e: { type?: string; mentioned?: { id?: string } }) =>
         e.type === "mention" &&
         e.mentioned?.id &&
-        (e.mentioned.id === this.config.appId ||
-          e.mentioned.id.endsWith(`:${this.config.appId}`))
+        (e.mentioned.id === this.app.id ||
+          e.mentioned.id.endsWith(`:${this.app.id}`))
     );
     if (isMention) {
       message.isMention = true;
@@ -1006,7 +933,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       cachedServiceUrl ||
       this.api.serviceUrl ||
       "https://smba.trafficmanager.net/teams/";
-    const tenantId = cachedTenantId || this.config.appTenantId;
+    const tenantId = cachedTenantId || this.config.tenantId;
 
     this.logger.debug("Teams: creating 1:1 conversation", {
       userId,
@@ -1026,7 +953,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     try {
       const result = await this.api.conversations.create({
         isGroup: false,
-        bot: { id: this.config.appId, name: this.userName },
+        bot: { id: this.app.id, name: this.userName },
         // Account requires role/name but Teams API only needs id for DM members
         members: [{ id: userId, name: "", role: "user" }],
         tenantId,
@@ -1102,7 +1029,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     threadId: string,
     options: FetchOptions = {}
   ): Promise<FetchResult<unknown>> {
-    if (!this.config.appTenantId) {
+    if (!this.config.tenantId) {
       throw new NotImplementedError(
         "Teams fetchMessages requires appTenantId to be configured for Microsoft Graph API access.",
         "fetchMessages"
@@ -1222,8 +1149,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         .filter((msg) => msg.id)
         .map((msg) => {
           const isFromBot =
-            msg.from?.application?.id === this.config.appId ||
-            msg.from?.user?.id === this.config.appId;
+            msg.from?.application?.id === this.app.id ||
+            msg.from?.user?.id === this.app.id;
 
           return new Message({
             id: msg.id as string,
@@ -1382,8 +1309,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       .filter((msg) => msg.id)
       .map((msg) => {
         const isFromBot =
-          msg.from?.application?.id === this.config.appId ||
-          msg.from?.user?.id === this.config.appId;
+          msg.from?.application?.id === this.app.id ||
+          msg.from?.user?.id === this.app.id;
 
         return new Message({
           id: msg.id as string,
@@ -1565,7 +1492,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     channelId: string,
     options: FetchOptions = {}
   ): Promise<FetchResult<unknown>> {
-    if (!this.config.appTenantId) {
+    if (!this.config.tenantId) {
       throw new NotImplementedError(
         "Teams fetchChannelMessages requires appTenantId for Microsoft Graph API access.",
         "fetchChannelMessages"
@@ -1705,8 +1632,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         .filter((msg) => msg.id)
         .map((msg) => {
           const isFromBot =
-            msg.from?.application?.id === this.config.appId ||
-            msg.from?.user?.id === this.config.appId;
+            msg.from?.application?.id === this.app.id ||
+            msg.from?.user?.id === this.app.id;
           return new Message({
             id: msg.id as string,
             threadId: channelId,
@@ -1767,7 +1694,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     channelId: string,
     options: ListThreadsOptions = {}
   ): Promise<ListThreadsResult<unknown>> {
-    if (!this.config.appTenantId) {
+    if (!this.config.tenantId) {
       throw new NotImplementedError(
         "Teams listThreads requires appTenantId for Microsoft Graph API access.",
         "listThreads"
@@ -1825,8 +1752,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           });
 
           const isFromBot =
-            msg.from?.application?.id === this.config.appId ||
-            msg.from?.user?.id === this.config.appId;
+            msg.from?.application?.id === this.app.id ||
+            msg.from?.user?.id === this.app.id;
 
           threads.push({
             id: threadId,
@@ -1883,8 +1810,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           });
 
           const isFromBot =
-            msg.from?.application?.id === this.config.appId ||
-            msg.from?.user?.id === this.config.appId;
+            msg.from?.application?.id === this.app.id ||
+            msg.from?.user?.id === this.app.id;
 
           threads.push({
             id: threadId,
@@ -1954,7 +1881,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       }
     }
 
-    if (channelContext && this.config.appTenantId) {
+    if (channelContext && this.config.tenantId) {
       try {
         this.logger.debug("Teams Graph API: GET channel info", {
           teamId: channelContext.teamId,
@@ -2099,15 +2026,15 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
 
   private isMessageFromSelf(activity: Activity): boolean {
     const fromId = activity.from?.id;
-    if (!(fromId && this.config.appId)) {
+    if (!(fromId && this.app.id)) {
       return false;
     }
 
-    if (fromId === this.config.appId) {
+    if (fromId === this.app.id) {
       return true;
     }
 
-    if (fromId.endsWith(`:${this.config.appId}`)) {
+    if (fromId.endsWith(`:${this.app.id}`)) {
       return true;
     }
 

@@ -46,8 +46,8 @@ describe("Teams Integration", () => {
 
     state = createMemoryState();
     teamsAdapter = createTeamsAdapter({
-      appId: TEAMS_APP_ID,
-      appPassword: TEAMS_APP_PASSWORD,
+      clientId: TEAMS_APP_ID,
+      clientSecret: TEAMS_APP_PASSWORD,
       userName: TEAMS_BOT_NAME,
       logger: mockLogger,
     });

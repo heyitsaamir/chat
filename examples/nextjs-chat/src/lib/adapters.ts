@@ -155,7 +155,6 @@ export function buildAdapters(): Adapters {
   if (process.env.CLIENT_ID || process.env.TEAMS_APP_ID) {
     adapters.teams = withRecording(
       createTeamsAdapter({
-        appType: "SingleTenant",
         userName: "Chat SDK Demo",
         logger: logger.child("teams"),
       }),

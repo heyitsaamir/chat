@@ -149,7 +149,7 @@ describe("Replay Tests - Actions & Reactions", () => {
       capturedReaction = null;
 
       ctx = createTeamsTestContext(
-        { botName: teamsFixtures.botName, appId: teamsFixtures.appId },
+        { botName: teamsFixtures.botName, clientId: teamsFixtures.appId },
         {
           onMention: async (thread) => {
             await thread.subscribe();

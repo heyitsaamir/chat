@@ -461,7 +461,7 @@ describe("Replay Tests - Channel", () => {
       ctx = createTeamsTestContext(
         {
           botName: teamsFixtures.botName,
-          appId: teamsFixtures.appId,
+          clientId: teamsFixtures.appId,
         },
         {
           onMention: async (thread) => {

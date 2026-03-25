@@ -110,8 +110,8 @@ describe("TeamsAdapter", () => {
 
   it("should create an adapter instance", () => {
     const adapter = createTeamsAdapter({
-      appId: "test-app-id",
-      appPassword: "test-password",
+      clientId: "test-app-id",
+      clientSecret: "test-password",
       logger: mockLogger,
     });
     expect(adapter).toBeInstanceOf(TeamsAdapter);
@@ -121,8 +121,8 @@ describe("TeamsAdapter", () => {
   describe("thread ID encoding", () => {
     it("should encode and decode thread IDs", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -141,8 +141,8 @@ describe("TeamsAdapter", () => {
 
     it("should preserve messageid in thread context for channel threads", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -161,8 +161,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw ValidationError for invalid thread IDs", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -175,8 +175,8 @@ describe("TeamsAdapter", () => {
 
     it("should handle special characters in conversationId and serviceUrl", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -202,8 +202,8 @@ describe("TeamsAdapter", () => {
   describe("constructor", () => {
     it("should set default userName to 'bot'", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
       expect(adapter.userName).toBe("bot");
@@ -211,43 +211,30 @@ describe("TeamsAdapter", () => {
 
     it("should use provided userName", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
         userName: "mybot",
       });
       expect(adapter.userName).toBe("mybot");
     });
 
-    it("should throw ValidationError when SingleTenant without appTenantId", () => {
+    it("should accept tenantId config", () => {
       expect(
         () =>
           new TeamsAdapter({
-            appId: "test",
-            appPassword: "test",
+            clientId: "test",
+            clientSecret: "test",
             logger: mockLogger,
-            appType: "SingleTenant",
-          })
-      ).toThrow(ValidationError);
-    });
-
-    it("should not throw when SingleTenant with appTenantId", () => {
-      expect(
-        () =>
-          new TeamsAdapter({
-            appId: "test",
-            appPassword: "test",
-            logger: mockLogger,
-            appType: "SingleTenant",
-            appTenantId: "some-tenant-id",
+            tenantId: "some-tenant-id",
           })
       ).not.toThrow();
     });
 
     it("should have name 'teams'", () => {
       const adapter = new TeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
       expect(adapter.name).toBe("teams");
@@ -259,17 +246,7 @@ describe("TeamsAdapter", () => {
   // ==========================================================================
 
   describe("constructor env var resolution", () => {
-    it("should throw when appId is missing and env var not set", () => {
-      expect(() => new TeamsAdapter({})).toThrow("appId is required");
-    });
-
-    it("should throw when appPassword is missing and env var not set", () => {
-      expect(() => new TeamsAdapter({ appId: "test" })).toThrow(
-        "One of appPassword, federated, token, or managedIdentityClientId must be provided"
-      );
-    });
-
-    it("should resolve appId from CLIENT_ID env var", () => {
+    it("should resolve clientId from CLIENT_ID env var", () => {
       process.env.CLIENT_ID = "env-app-id";
       process.env.CLIENT_SECRET = "env-password";
       const adapter = new TeamsAdapter();
@@ -278,15 +255,15 @@ describe("TeamsAdapter", () => {
 
     it("should resolve appPassword from CLIENT_SECRET env var", () => {
       process.env.CLIENT_SECRET = "env-password";
-      const adapter = new TeamsAdapter({ appId: "test" });
+      const adapter = new TeamsAdapter({ clientId: "test" });
       expect(adapter).toBeInstanceOf(TeamsAdapter);
     });
 
     it("should resolve appTenantId from TENANT_ID env var", () => {
       process.env.TENANT_ID = "env-tenant";
       const adapter = new TeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
       });
       expect(adapter).toBeInstanceOf(TeamsAdapter);
     });
@@ -301,8 +278,8 @@ describe("TeamsAdapter", () => {
     it("should prefer config values over env vars", () => {
       process.env.CLIENT_ID = "env-app-id";
       const adapter = new TeamsAdapter({
-        appId: "config-app-id",
-        appPassword: "test",
+        clientId: "config-app-id",
+        clientSecret: "test",
       });
       expect(adapter).toBeInstanceOf(TeamsAdapter);
       expect(adapter.name).toBe("teams");
@@ -316,19 +293,17 @@ describe("TeamsAdapter", () => {
   describe("createTeamsAdapter factory", () => {
     it("should delegate to constructor", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
       expect(adapter).toBeInstanceOf(TeamsAdapter);
     });
 
-    it("should create adapter with federated auth", () => {
+    it("should create adapter with managedIdentityClientId (federated)", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        federated: {
-          clientId: "managed-identity-client-id",
-        },
+        clientId: "test",
+        managedIdentityClientId: "managed-identity-client-id",
         logger: mockLogger,
       });
       expect(adapter).toBeInstanceOf(TeamsAdapter);
@@ -336,7 +311,7 @@ describe("TeamsAdapter", () => {
 
     it("should create adapter with token auth", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
+        clientId: "test",
         token: async () => "test-token",
         logger: mockLogger,
       });
@@ -345,44 +320,11 @@ describe("TeamsAdapter", () => {
 
     it("should create adapter with managedIdentityClientId", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
+        clientId: "test",
         managedIdentityClientId: "system",
         logger: mockLogger,
       });
       expect(adapter).toBeInstanceOf(TeamsAdapter);
-    });
-
-    it("should throw when multiple auth methods are provided", () => {
-      expect(() =>
-        createTeamsAdapter({
-          appId: "test",
-          appPassword: "test",
-          federated: {
-            clientId: "managed-identity-client-id",
-          },
-          logger: mockLogger,
-        })
-      ).toThrow(ValidationError);
-    });
-
-    it("should not require appPassword env var when federated is provided", () => {
-      const origAppPwd = process.env.TEAMS_APP_PASSWORD;
-      // biome-ignore lint/performance/noDelete: env var removal requires delete
-      delete process.env.TEAMS_APP_PASSWORD;
-      try {
-        const adapter = createTeamsAdapter({
-          appId: "test",
-          federated: {
-            clientId: "managed-identity-client-id",
-          },
-          logger: mockLogger,
-        });
-        expect(adapter).toBeInstanceOf(TeamsAdapter);
-      } finally {
-        if (origAppPwd !== undefined) {
-          process.env.TEAMS_APP_PASSWORD = origAppPwd;
-        }
-      }
     });
   });
 
@@ -393,8 +335,8 @@ describe("TeamsAdapter", () => {
   describe("isMessageFromSelf (via parseMessage)", () => {
     it("should detect exact match of appId", () => {
       const adapter = createTeamsAdapter({
-        appId: "abc123-def456",
-        appPassword: "test",
+        clientId: "abc123-def456",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -413,8 +355,8 @@ describe("TeamsAdapter", () => {
 
     it("should detect Teams-prefixed bot ID (28:appId)", () => {
       const adapter = createTeamsAdapter({
-        appId: "abc123-def456",
-        appPassword: "test",
+        clientId: "abc123-def456",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -433,8 +375,8 @@ describe("TeamsAdapter", () => {
 
     it("should not detect unrelated user as self", () => {
       const adapter = createTeamsAdapter({
-        appId: "abc123-def456",
-        appPassword: "test",
+        clientId: "abc123-def456",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -453,8 +395,8 @@ describe("TeamsAdapter", () => {
 
     it("should return false when from.id is undefined", () => {
       const adapter = createTeamsAdapter({
-        appId: "abc123",
-        appPassword: "test",
+        clientId: "abc123",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -479,8 +421,8 @@ describe("TeamsAdapter", () => {
   describe("parseMessage", () => {
     it("should parse basic text message", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -504,8 +446,8 @@ describe("TeamsAdapter", () => {
 
     it("should handle missing text gracefully", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -523,8 +465,8 @@ describe("TeamsAdapter", () => {
 
     it("should handle missing from fields gracefully", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -543,8 +485,8 @@ describe("TeamsAdapter", () => {
 
     it("should filter out adaptive card attachments", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -576,8 +518,8 @@ describe("TeamsAdapter", () => {
 
     it("should filter out text/html attachments without contentUrl", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -602,8 +544,8 @@ describe("TeamsAdapter", () => {
 
     it("should classify attachment types by contentType", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -648,8 +590,8 @@ describe("TeamsAdapter", () => {
 
     it("should set metadata.edited to false for new messages", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -678,8 +620,8 @@ describe("TeamsAdapter", () => {
   describe("normalizeMentions (via parseMessage)", () => {
     it("should trim whitespace from text", () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app",
-        appPassword: "test",
+        clientId: "test-app",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -705,8 +647,8 @@ describe("TeamsAdapter", () => {
   describe("isDM", () => {
     it("should return false for group chats (19: prefix)", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -720,8 +662,8 @@ describe("TeamsAdapter", () => {
 
     it("should return true for DM conversations (non-19: prefix)", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -735,8 +677,8 @@ describe("TeamsAdapter", () => {
 
     it("should return false for channel threads with messageid", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -768,8 +710,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw AuthenticationError for 401 status", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -784,8 +726,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw AuthenticationError for 403 status", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -800,8 +742,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw NetworkError for 404 status", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -816,8 +758,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw AdapterRateLimitError for 429 status", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -832,8 +774,8 @@ describe("TeamsAdapter", () => {
 
     it("should handle TeamsSDK HttpError with innerHttpError", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -848,8 +790,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw AdapterRateLimitError with retryAfter for 429", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -867,8 +809,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw PermissionError for messages containing 'permission'", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -883,8 +825,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw NetworkError for generic errors with message", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -899,8 +841,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw NetworkError for unknown error types", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -911,8 +853,8 @@ describe("TeamsAdapter", () => {
 
     it("should throw NetworkError for null/undefined errors", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -923,8 +865,8 @@ describe("TeamsAdapter", () => {
 
     it("should use status field if statusCode not present", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -939,8 +881,8 @@ describe("TeamsAdapter", () => {
 
     it("should use code field if statusCode and status not present", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -965,8 +907,8 @@ describe("TeamsAdapter", () => {
 
     it("should extract plain text content", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -980,8 +922,8 @@ describe("TeamsAdapter", () => {
 
     it("should strip HTML tags from html content", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -998,8 +940,8 @@ describe("TeamsAdapter", () => {
 
     it("should return empty string for missing body", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1009,8 +951,8 @@ describe("TeamsAdapter", () => {
 
     it("should return '[Card]' for adaptive card without title", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1030,8 +972,8 @@ describe("TeamsAdapter", () => {
 
     it("should extract card title from bolder TextBlock", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1057,8 +999,8 @@ describe("TeamsAdapter", () => {
 
     it("should return '[Card]' for invalid JSON in card content", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1095,8 +1037,8 @@ describe("TeamsAdapter", () => {
 
     it("should return null for null/undefined", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1106,8 +1048,8 @@ describe("TeamsAdapter", () => {
 
     it("should return null for non-object values", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1117,8 +1059,8 @@ describe("TeamsAdapter", () => {
 
     it("should return null for empty body", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1127,8 +1069,8 @@ describe("TeamsAdapter", () => {
 
     it("should find title with weight: bolder", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1144,8 +1086,8 @@ describe("TeamsAdapter", () => {
 
     it("should find title with size: large", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1161,8 +1103,8 @@ describe("TeamsAdapter", () => {
 
     it("should fallback to first TextBlock when no styled title found", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1184,8 +1126,8 @@ describe("TeamsAdapter", () => {
   describe("channelIdFromThreadId", () => {
     it("should strip messageid from thread ID", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1203,8 +1145,8 @@ describe("TeamsAdapter", () => {
 
     it("should return same ID when no messageid present", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1227,8 +1169,8 @@ describe("TeamsAdapter", () => {
   describe("fetchThread", () => {
     it("should return basic thread info", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1251,8 +1193,8 @@ describe("TeamsAdapter", () => {
   describe("fetchMessages", () => {
     it("should throw NotImplementedError when no appTenantId configured", async () => {
       const adapter = new TeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1274,8 +1216,8 @@ describe("TeamsAdapter", () => {
   describe("handleWebhook", () => {
     it("should return 400 for invalid JSON body", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1299,8 +1241,8 @@ describe("TeamsAdapter", () => {
   describe("initialize", () => {
     it("should store chat instance and initialize app", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1327,8 +1269,8 @@ describe("TeamsAdapter", () => {
   describe("renderFormatted", () => {
     it("should delegate to format converter", () => {
       const adapter = createTeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1355,8 +1297,8 @@ describe("TeamsAdapter", () => {
   describe("postMessage", () => {
     it("should call app.send and return message ID", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app-id",
-        appPassword: "test",
+        clientId: "test-app-id",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1383,8 +1325,8 @@ describe("TeamsAdapter", () => {
 
     it("should handle send failure by calling handleTeamsError", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app-id",
-        appPassword: "test",
+        clientId: "test-app-id",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1409,8 +1351,8 @@ describe("TeamsAdapter", () => {
   describe("editMessage", () => {
     it("should call api.conversations.activities.update", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app-id",
-        appPassword: "test",
+        clientId: "test-app-id",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1445,8 +1387,8 @@ describe("TeamsAdapter", () => {
   describe("deleteMessage", () => {
     it("should call api.conversations.activities.delete", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app-id",
-        appPassword: "test",
+        clientId: "test-app-id",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1482,8 +1424,8 @@ describe("TeamsAdapter", () => {
   describe("startTyping", () => {
     it("should send typing activity via app.send", async () => {
       const adapter = createTeamsAdapter({
-        appId: "test-app-id",
-        appPassword: "test",
+        clientId: "test-app-id",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
@@ -1510,8 +1452,8 @@ describe("TeamsAdapter", () => {
   describe("openDM", () => {
     it("should throw ValidationError when no tenantId available", async () => {
       const adapter = new TeamsAdapter({
-        appId: "test",
-        appPassword: "test",
+        clientId: "test",
+        clientSecret: "test",
         logger: mockLogger,
       });
 
