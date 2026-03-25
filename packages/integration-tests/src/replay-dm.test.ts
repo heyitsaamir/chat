@@ -612,22 +612,9 @@ describe("DM Replay Tests", () => {
 
     it("should receive user reply in DM when subscribed", async () => {
       // Configure mock to return the actual DM conversation ID from fixtures
-      mockBotAdapter.createConversationAsync.mockImplementation(
-        async (...args: unknown[]) => {
-          const callback = args.at(-1) as
-            | ((context: unknown) => Promise<void>)
-            | undefined;
-          const mockTurnContext = {
-            activity: {
-              conversation: { id: teamsFixtures.dmConversationId },
-              id: "activity-dm",
-            },
-          };
-          if (typeof callback === "function") {
-            await callback(mockTurnContext);
-          }
-        }
-      );
+      mockBotAdapter.createConversationAsync.mockImplementation(async () => ({
+        id: teamsFixtures.dmConversationId,
+      }));
 
       // Step 1: Initial mention to subscribe (also caches serviceUrl and tenantId)
       await sendWebhook(teamsFixtures.mention);

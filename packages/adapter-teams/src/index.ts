@@ -1,38 +1,3 @@
-import type { TokenCredential } from "@azure/identity";
-import {
-  ClientCertificateCredential,
-  ClientSecretCredential,
-  DefaultAzureCredential,
-} from "@azure/identity";
-import { Client } from "@microsoft/microsoft-graph-client";
-import {
-  TokenCredentialAuthenticationProvider,
-  type TokenCredentialAuthenticationProviderOptions,
-} from "@microsoft/microsoft-graph-client/authProviders/azureTokenCredentials/index.js";
-import type { Activity, ConversationReference } from "botbuilder";
-import {
-  ActivityTypes,
-  CloudAdapter,
-  ConfigurationBotFrameworkAuthentication,
-  TeamsInfo,
-  type TurnContext,
-} from "botbuilder";
-import {
-  CertificateServiceClientCredentialsFactory,
-  FederatedServiceClientCredentialsFactory,
-} from "botframework-connector";
-
-/** Extended CloudAdapter that exposes processActivity for serverless environments */
-class ServerlessCloudAdapter extends CloudAdapter {
-  handleActivity(
-    authHeader: string,
-    activity: Activity,
-    logic: (context: TurnContext) => Promise<void>
-  ) {
-    return this.processActivity(authHeader, activity, logic);
-  }
-}
-
 import {
   AdapterRateLimitError,
   AuthenticationError,
@@ -44,6 +9,21 @@ import {
   toBuffer,
   ValidationError,
 } from "@chat-adapter/shared";
+import type {
+  Activity,
+  IMessageActivity,
+  MessageReactionActivity,
+  MessageReactionType,
+} from "@microsoft/teams.api";
+import { MessageActivity, TypingActivity } from "@microsoft/teams.api";
+import type {
+  AppOptions,
+  IActivityContext,
+  IHttpServerRequest,
+  IPlugin,
+} from "@microsoft/teams.apps";
+import { App } from "@microsoft/teams.apps";
+import { chats, teams } from "@microsoft/teams.graph-endpoints";
 import type {
   ActionEvent,
   Adapter,
@@ -61,6 +41,8 @@ import type {
   Logger,
   RawMessage,
   ReactionEvent,
+  StreamChunk,
+  StreamOptions,
   ThreadInfo,
   ThreadSummary,
   WebhookOptions,
@@ -72,6 +54,7 @@ import {
   Message,
   NotImplementedError,
 } from "chat";
+import { BridgeHttpAdapter } from "./bridge-adapter";
 import { cardToAdaptiveCard } from "./cards";
 import { TeamsFormatConverter } from "./markdown";
 
@@ -79,44 +62,15 @@ const MESSAGEID_CAPTURE_PATTERN = /messageid=(\d+)/;
 const MESSAGEID_STRIP_PATTERN = /;messageid=\d+/;
 const SEMICOLON_MESSAGEID_CAPTURE_PATTERN = /;messageid=(\d+)/;
 
-/** Microsoft Graph API chat message type */
-interface GraphChatMessage {
-  attachments?: Array<{
-    id?: string;
-    contentType?: string;
-    contentUrl?: string;
-    content?: string; // JSON string for adaptive cards
-    name?: string;
-  }>;
-  body?: {
-    content?: string;
-    contentType?: "text" | "html";
-  };
-  createdDateTime?: string;
-  from?: {
-    user?: {
-      id?: string;
-      displayName?: string;
-    };
-    application?: {
-      id?: string;
-      displayName?: string;
-    };
-  };
-  id: string;
-  lastModifiedDateTime?: string;
-  replyToId?: string; // ID of parent message for channel threads
-}
-
-/** Certificate-based authentication config */
-export interface TeamsAuthCertificate {
-  /** PEM-encoded certificate private key */
-  certificatePrivateKey: string;
-  /** Hex-encoded certificate thumbprint (optional when x5c is provided) */
-  certificateThumbprint?: string;
-  /** Public certificate for subject-name validation (optional) */
-  x5c?: string;
-}
+/**
+ * Graph API chat message — uses the shape returned by @microsoft/teams.graph-endpoints.
+ * Nullable fields are accessed via `??` / `||` at usage sites.
+ */
+/** Infer the chat message type from the graph-endpoints list response */
+type ChatMessageListResponse = Awaited<
+  ReturnType<typeof App.prototype.graph.call<typeof chats.messages.list>>
+>;
+type GraphMessage = NonNullable<ChatMessageListResponse["value"]>[number];
 
 /** Federated (workload identity) authentication config */
 export interface TeamsAuthFederated {
@@ -135,12 +89,17 @@ export interface TeamsAdapterConfig {
   appTenantId?: string;
   /** Microsoft App Type */
   appType?: "MultiTenant" | "SingleTenant";
-  /** Certificate-based authentication */
-  certificate?: TeamsAuthCertificate;
   /** Federated (workload identity) authentication */
   federated?: TeamsAuthFederated;
   /** Logger instance for error reporting. Defaults to ConsoleLogger. */
   logger?: Logger;
+  /** Managed identity client ID for authentication */
+  managedIdentityClientId?: "system" | (string & {});
+  /** Custom token provider for authentication */
+  token?: (
+    scope: string | string[],
+    tenantId?: string
+  ) => string | Promise<string>;
   /** Override bot username (optional) */
   userName?: string;
 }
@@ -164,16 +123,19 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   readonly userName: string;
   readonly botUserId?: string;
 
-  private readonly botAdapter: ServerlessCloudAdapter;
-  private readonly graphClient: Client | null = null;
+  private readonly app: App;
+  private readonly bridgeAdapter: BridgeHttpAdapter;
   private chat: ChatInstance | null = null;
   private readonly logger: Logger;
   private readonly formatConverter = new TeamsFormatConverter();
   private readonly config: Required<Pick<TeamsAdapterConfig, "appId">> &
     TeamsAdapterConfig;
 
+  /** Request-scoped webhook options for passing waitUntil to handlers */
+  private currentWebhookOptions: WebhookOptions | undefined;
+
   constructor(config: TeamsAdapterConfig = {}) {
-    const appId = config.appId ?? process.env.TEAMS_APP_ID;
+    const appId = config.appId ?? process.env.CLIENT_ID;
     if (!appId) {
       throw new ValidationError(
         "teams",
@@ -181,11 +143,11 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       );
     }
     const hasExplicitAuth =
-      config.appPassword || config.certificate || config.federated;
+      config.appPassword || config.federated || config.token;
     const appPassword = hasExplicitAuth
       ? config.appPassword
-      : (config.appPassword ?? process.env.TEAMS_APP_PASSWORD);
-    const appTenantId = config.appTenantId ?? process.env.TEAMS_APP_TENANT_ID;
+      : (config.appPassword ?? process.env.CLIENT_SECRET);
+    const appTenantId = config.appTenantId ?? process.env.TENANT_ID;
 
     this.config = {
       ...config,
@@ -198,21 +160,22 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
 
     const authMethodCount = [
       appPassword,
-      config.certificate,
       config.federated,
+      config.token,
+      config.managedIdentityClientId,
     ].filter(Boolean).length;
 
     if (authMethodCount === 0) {
       throw new ValidationError(
         "teams",
-        "One of appPassword, certificate, or federated must be provided"
+        "One of appPassword, federated, token, or managedIdentityClientId must be provided"
       );
     }
 
     if (authMethodCount > 1) {
       throw new ValidationError(
         "teams",
-        "Only one of appPassword, certificate, or federated can be provided"
+        "Only one of appPassword, federated, token, or managedIdentityClientId can be provided"
       );
     }
 
@@ -223,347 +186,135 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       );
     }
 
-    // Build Bot Framework auth based on credential type
-    const botFrameworkConfig = {
-      MicrosoftAppId: appId,
-      MicrosoftAppType: config.appType || "MultiTenant",
-      MicrosoftAppTenantId:
-        config.appType === "SingleTenant" ? appTenantId : undefined,
+    // Create the BridgeHttpAdapter for serverless dispatch
+    this.bridgeAdapter = new BridgeHttpAdapter();
+
+    // Build TeamsSDK App options
+    const appOptions: AppOptions<IPlugin> = {
+      clientId: appId,
+      clientSecret: appPassword || undefined,
+      tenantId: appTenantId || undefined,
+      token: config.token,
+      managedIdentityClientId:
+        config.managedIdentityClientId ??
+        (config.federated ? config.federated.clientId : undefined),
+      httpServerAdapter: this.bridgeAdapter,
+      serviceUrl: process.env.SERVICE_URL,
     };
 
-    let credentialsFactory:
-      | CertificateServiceClientCredentialsFactory
-      | FederatedServiceClientCredentialsFactory
-      | undefined;
-    let graphCredential: TokenCredential | undefined;
-
-    if (config.certificate) {
-      const { certificatePrivateKey, certificateThumbprint, x5c } =
-        config.certificate;
-
-      if (x5c) {
-        credentialsFactory = new CertificateServiceClientCredentialsFactory(
-          appId,
-          x5c,
-          certificatePrivateKey,
-          appTenantId
-        );
-      } else if (certificateThumbprint) {
-        credentialsFactory = new CertificateServiceClientCredentialsFactory(
-          appId,
-          certificateThumbprint,
-          certificatePrivateKey,
-          appTenantId
-        );
-      } else {
-        throw new ValidationError(
-          "teams",
-          "Certificate auth requires either certificateThumbprint or x5c"
-        );
-      }
-
-      if (appTenantId) {
-        graphCredential = new ClientCertificateCredential(appTenantId, appId, {
-          certificate: certificatePrivateKey,
-        });
-      }
-    } else if (config.federated) {
-      credentialsFactory = new FederatedServiceClientCredentialsFactory(
-        appId,
-        config.federated.clientId,
-        appTenantId,
-        config.federated.clientAudience
-      );
-
-      if (appTenantId) {
-        graphCredential = new DefaultAzureCredential();
-      }
-    } else if (appPassword && appTenantId) {
-      graphCredential = new ClientSecretCredential(
-        appTenantId,
-        appId,
-        appPassword
-      );
-    }
-
-    const auth = new ConfigurationBotFrameworkAuthentication(
-      {
-        ...botFrameworkConfig,
-        ...(appPassword ? { MicrosoftAppPassword: appPassword } : {}),
-      },
-      credentialsFactory
-    );
-
-    this.botAdapter = new ServerlessCloudAdapter(auth);
-
-    // Initialize Microsoft Graph client for message history (requires tenant ID)
-    if (graphCredential) {
-      const authProvider = new TokenCredentialAuthenticationProvider(
-        graphCredential,
-        {
-          scopes: ["https://graph.microsoft.com/.default"],
-        } as TokenCredentialAuthenticationProviderOptions
-      );
-
-      this.graphClient = Client.initWithMiddleware({ authProvider });
-    }
+    this.app = new App(appOptions);
   }
 
-  async initialize(chat: ChatInstance): Promise<void> {
-    this.chat = chat;
+  /**
+   * Register TeamsSDK event handlers.
+   * Called from initialize() after this.chat is set.
+   */
+  private registerEventHandlers(): void {
+    this.app.on("message", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      await this.handleMessageActivity(ctx);
+    });
+
+    this.app.on("messageReaction", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      this.handleReactionFromContext(ctx);
+    });
+
+    this.app.on("card.action", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      await this.handleAdaptiveCardAction(ctx);
+      return {
+        statusCode: 200,
+        type: "application/vnd.microsoft.activity.message",
+        value: "",
+      };
+    });
+
+    this.app.on("conversationUpdate", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+    });
+
+    this.app.on("installationUpdate", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+    });
   }
 
-  async handleWebhook(
-    request: Request,
-    options?: WebhookOptions
-  ): Promise<Response> {
-    const body = await request.text();
-    this.logger.debug("Teams webhook raw body", { body });
-
-    let activity: Activity;
-    try {
-      activity = JSON.parse(body);
-    } catch (e) {
-      this.logger.error("Failed to parse request body", { error: e });
-      return new Response("Invalid JSON", { status: 400 });
+  /**
+   * Cache serviceUrl, tenantId, and channel context from activity metadata.
+   * Called inline from each event handler (not middleware).
+   */
+  private cacheUserContext(activity: Activity): void {
+    if (!(this.chat && activity.from?.id)) {
+      return;
     }
 
-    // Get the auth header for token validation
-    const authHeader = request.headers.get("authorization") || "";
+    const userId = activity.from.id;
+    const ttl = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-    try {
-      // Use handleActivity which takes the activity directly
-      // instead of mocking Node.js req/res objects
-      await this.botAdapter.handleActivity(
-        authHeader,
-        activity,
-        async (context) => {
-          await this.handleTurn(context, options);
+    // Cache serviceUrl for DM creation
+    if (activity.serviceUrl) {
+      this.chat
+        .getState()
+        .set(`teams:serviceUrl:${userId}`, activity.serviceUrl, ttl)
+        .catch(() => {});
+    }
+
+    const channelData = activity.channelData as
+      | {
+          tenant?: { id?: string };
+          team?: { id?: string; aadGroupId?: string };
+          channel?: { id?: string };
         }
-      );
+      | undefined;
+    const tenantId = channelData?.tenant?.id;
 
-      return new Response(JSON.stringify({}), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    } catch (error) {
-      this.logger.error("Bot adapter process error", { error });
-      return new Response(JSON.stringify({ error: "Internal error" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+    if (tenantId) {
+      this.chat
+        .getState()
+        .set(`teams:tenantId:${userId}`, tenantId, ttl)
+        .catch(() => {});
+    }
+
+    // Cache channel context for Graph API message fetching
+    const teamAadGroupId = channelData?.team?.aadGroupId;
+    const conversationId = activity.conversation?.id || "";
+    const baseChannelId = conversationId.replace(MESSAGEID_STRIP_PATTERN, "");
+
+    if (teamAadGroupId && channelData?.channel?.id && tenantId) {
+      const context: TeamsChannelContext = {
+        teamId: teamAadGroupId,
+        channelId: channelData.channel.id,
+        tenantId,
+      };
+      this.chat
+        .getState()
+        .set(
+          `teams:channelContext:${baseChannelId}`,
+          JSON.stringify(context),
+          ttl
+        )
+        .catch(() => {});
     }
   }
 
-  private async handleTurn(
-    context: TurnContext,
-    options?: WebhookOptions
-  ): Promise<void> {
+  /**
+   * Handle message activities (normal messages + Action.Submit button clicks).
+   */
+  private async handleMessageActivity(ctx: IActivityContext): Promise<void> {
     if (!this.chat) {
       this.logger.warn("Chat instance not initialized, ignoring event");
       return;
     }
 
-    const activity = context.activity;
-
-    // Cache serviceUrl and tenantId for the user - needed for opening DMs later
-    if (activity.from?.id && activity.serviceUrl) {
-      const userId = activity.from.id;
-      const channelData = activity.channelData as {
-        tenant?: { id?: string };
-        team?: { id?: string };
-        channel?: { id?: string };
-      };
-      const tenantId = channelData?.tenant?.id;
-      const ttl = 30 * 24 * 60 * 60 * 1000; // 30 days
-
-      // Store serviceUrl and tenantId for DM creation
-      this.chat
-        .getState()
-        .set(`teams:serviceUrl:${userId}`, activity.serviceUrl, ttl)
-        .catch((err) => {
-          this.logger.error("Failed to cache serviceUrl", {
-            userId,
-            error: err,
-          });
-        });
-      if (tenantId) {
-        this.chat
-          .getState()
-          .set(`teams:tenantId:${userId}`, tenantId, ttl)
-          .catch((err) => {
-            this.logger.error("Failed to cache tenantId", {
-              userId,
-              error: err,
-            });
-          });
-      }
-
-      // Cache team/channel context for proper message fetching in channel threads
-      // This allows fetchMessages to use the channel-specific endpoint for thread filtering
-      // The Graph API requires aadGroupId (GUID format), not the Teams thread-style ID
-      // Note: The botbuilder types don't include aadGroupId, but it's present at runtime
-      // aadGroupId is only available in installationUpdate/conversationUpdate events
-      const team = channelData?.team as
-        | { id?: string; aadGroupId?: string }
-        | undefined;
-      const teamAadGroupId = team?.aadGroupId;
-      const teamThreadId = team?.id; // Thread-style ID like "19:xxx@thread.tacv2"
-      const conversationId = activity.conversation?.id || "";
-      const baseChannelId = conversationId.replace(MESSAGEID_STRIP_PATTERN, "");
-
-      if (teamAadGroupId && channelData?.channel?.id && tenantId) {
-        // We have aadGroupId (from installationUpdate/conversationUpdate) - cache it
-        const context: TeamsChannelContext = {
-          teamId: teamAadGroupId, // Use aadGroupId (GUID) for Graph API
-          channelId: channelData.channel.id,
-          tenantId,
-        };
-        const contextJson = JSON.stringify(context);
-
-        // Cache by conversation ID (channel)
-        this.chat
-          .getState()
-          .set(`teams:channelContext:${baseChannelId}`, contextJson, ttl)
-          .catch((err) => {
-            this.logger.error("Failed to cache channel context", {
-              conversationId: baseChannelId,
-              error: err,
-            });
-          });
-
-        // Also cache by team thread-style ID for lookup from regular messages
-        // (which don't have aadGroupId but do have team.id)
-        if (teamThreadId) {
-          this.chat
-            .getState()
-            .set(`teams:teamContext:${teamThreadId}`, contextJson, ttl)
-            .catch((err) => {
-              this.logger.error("Failed to cache team context", {
-                teamThreadId,
-                error: err,
-              });
-            });
-        }
-
-        this.logger.info(
-          "Cached Teams team GUID from installation/update event",
-          {
-            activityType: activity.type,
-            conversationId: baseChannelId,
-            teamThreadId,
-            teamGuid: context.teamId,
-            channelId: context.channelId,
-          }
-        );
-      } else if (teamThreadId && channelData?.channel?.id && tenantId) {
-        // Regular message event - no aadGroupId, but try to look up from previous cache
-        const cachedTeamContext = await this.chat
-          .getState()
-          .get<string>(`teams:teamContext:${teamThreadId}`);
-
-        if (cachedTeamContext) {
-          // Found cached context from installation event - also cache by channel ID
-          this.chat
-            .getState()
-            .set(
-              `teams:channelContext:${baseChannelId}`,
-              cachedTeamContext,
-              ttl
-            )
-            .catch((err) => {
-              this.logger.error("Failed to cache channel context from team", {
-                conversationId: baseChannelId,
-                error: err,
-              });
-            });
-          this.logger.info("Using cached Teams team GUID for channel", {
-            conversationId: baseChannelId,
-            teamThreadId,
-          });
-        } else {
-          // No cached context - try to fetch team details via Bot Framework API
-          // TeamsInfo.getTeamDetails() calls /v3/teams/{teamId} and returns aadGroupId
-          try {
-            const teamDetails = await TeamsInfo.getTeamDetails(context);
-            if (teamDetails?.aadGroupId) {
-              const fetchedContext: TeamsChannelContext = {
-                teamId: teamDetails.aadGroupId,
-                channelId: channelData.channel.id,
-                tenantId,
-              };
-              const contextJson = JSON.stringify(fetchedContext);
-
-              // Cache by conversation ID
-              this.chat
-                .getState()
-                .set(`teams:channelContext:${baseChannelId}`, contextJson, ttl)
-                .catch((err) => {
-                  this.logger.error("Failed to cache fetched channel context", {
-                    conversationId: baseChannelId,
-                    error: err,
-                  });
-                });
-
-              // Also cache by team thread-style ID
-              this.chat
-                .getState()
-                .set(`teams:teamContext:${teamThreadId}`, contextJson, ttl)
-                .catch((err) => {
-                  this.logger.error("Failed to cache fetched team context", {
-                    teamThreadId,
-                    error: err,
-                  });
-                });
-
-              this.logger.info(
-                "Fetched and cached Teams team GUID via TeamsInfo API",
-                {
-                  conversationId: baseChannelId,
-                  teamThreadId,
-                  teamGuid: teamDetails.aadGroupId,
-                  teamName: teamDetails.name,
-                }
-              );
-            }
-          } catch (error) {
-            // TeamsInfo.getTeamDetails() only works in team scope
-            this.logger.debug(
-              "Could not fetch team details (may not be a team scope)",
-              { teamThreadId, error }
-            );
-          }
-        }
-      }
-    }
-
-    // Handle message reactions
-    if (activity.type === ActivityTypes.MessageReaction) {
-      this.handleReactionActivity(activity, options);
-      return;
-    }
-
-    // Handle adaptive card actions (button clicks)
-    if (activity.type === ActivityTypes.Invoke) {
-      await this.handleInvokeActivity(context, options);
-      return;
-    }
-
-    // Only handle message activities
-    if (activity.type !== ActivityTypes.Message) {
-      this.logger.debug("Ignoring non-message activity", {
-        type: activity.type,
-      });
-      return;
-    }
+    const activity = ctx.activity;
 
     // Check if this message activity is actually a button click (Action.Submit)
-    // Teams sends Action.Submit as a message with value.actionId
-    const actionValue = activity.value as
+    // IMessageActivity.value contains action data for Action.Submit clicks
+    const actionValue = (activity as IMessageActivity).value as
       | { actionId?: string; value?: string }
       | undefined;
     if (actionValue?.actionId) {
-      this.handleMessageAction(activity, actionValue, options);
+      this.handleMessageAction(activity, actionValue);
       return;
     }
 
@@ -573,23 +324,35 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       replyToId: activity.replyToId,
     });
 
-    // Let Chat class handle async processing and waitUntil
+    const message = this.parseTeamsMessage(activity, threadId);
+
+    // Detect @mention by checking if any mentioned entity matches our app ID
+    const entities = activity.entities || [];
+    const isMention = entities.some(
+      (e: { type?: string; mentioned?: { id?: string } }) =>
+        e.type === "mention" &&
+        e.mentioned?.id &&
+        (e.mentioned.id === this.config.appId ||
+          e.mentioned.id.endsWith(`:${this.config.appId}`))
+    );
+    if (isMention) {
+      message.isMention = true;
+    }
+
     this.chat.processMessage(
       this,
       threadId,
-      this.parseTeamsMessage(activity, threadId),
-      options
+      message,
+      this.currentWebhookOptions
     );
   }
 
   /**
    * Handle Action.Submit button clicks sent as message activities.
-   * Teams sends these with type "message" and value.actionId.
    */
   private handleMessageAction(
     activity: Activity,
-    actionValue: { actionId?: string; value?: string },
-    options?: WebhookOptions
+    actionValue: { actionId?: string; value?: string }
   ): void {
     if (!(this.chat && actionValue.actionId)) {
       return;
@@ -625,55 +388,27 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       threadId,
     });
 
-    this.chat.processAction(actionEvent, options);
+    this.chat.processAction(actionEvent, this.currentWebhookOptions);
   }
 
   /**
-   * Handle invoke activities (adaptive card actions, etc.).
+   * Handle adaptive card button clicks (invoke-based).
    */
-  private async handleInvokeActivity(
-    context: TurnContext,
-    options?: WebhookOptions
-  ): Promise<void> {
-    const activity = context.activity;
-
-    // Handle adaptive card action invokes
-    if (activity.name === "adaptiveCard/action") {
-      await this.handleAdaptiveCardAction(context, activity, options);
-      return;
-    }
-
-    this.logger.debug("Ignoring unsupported invoke", {
-      name: activity.name,
-    });
-  }
-
-  /**
-   * Handle adaptive card button clicks.
-   * The action data is in activity.value with our { actionId, value } structure.
-   */
-  private async handleAdaptiveCardAction(
-    context: TurnContext,
-    activity: Activity,
-    options?: WebhookOptions
-  ): Promise<void> {
+  private async handleAdaptiveCardAction(ctx: IActivityContext): Promise<void> {
     if (!this.chat) {
       return;
     }
 
-    // Activity.value contains our action data
-    const actionData = activity.value?.action?.data as
-      | { actionId?: string; value?: string }
+    const activity = ctx.activity;
+    // Invoke activities carry action data in activity.value
+    const activityValue = (activity as IMessageActivity).value as
+      | { action?: { data?: { actionId?: string; value?: string } } }
       | undefined;
+    const actionData = activityValue?.action?.data;
 
     if (!actionData?.actionId) {
       this.logger.debug("Adaptive card action missing actionId", {
-        value: activity.value,
-      });
-      // Send acknowledgment response
-      await context.sendActivity({
-        type: ActivityTypes.InvokeResponse,
-        value: { status: 200 },
+        value: activityValue,
       });
       return;
     }
@@ -708,34 +443,22 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       threadId,
     });
 
-    this.chat.processAction(actionEvent, options);
-
-    // Send acknowledgment response to prevent timeout
-    await context.sendActivity({
-      type: ActivityTypes.InvokeResponse,
-      value: { status: 200 },
-    });
+    this.chat.processAction(actionEvent, this.currentWebhookOptions);
   }
 
   /**
-   * Handle Teams reaction events (reactionsAdded/reactionsRemoved).
+   * Handle Teams reaction events.
    */
-  private handleReactionActivity(
-    activity: Activity,
-    options?: WebhookOptions
-  ): void {
+  private handleReactionFromContext(ctx: IActivityContext): void {
     if (!this.chat) {
       return;
     }
 
-    // Extract the message ID from conversation ID
-    // Format: "19:xxx@thread.tacv2;messageid=1767297849909"
+    const activity = ctx.activity as MessageReactionActivity;
     const conversationId = activity.conversation?.id || "";
     const messageIdMatch = conversationId.match(MESSAGEID_CAPTURE_PATTERN);
     const messageId = messageIdMatch?.[1] || activity.replyToId || "";
 
-    // Build thread ID - KEEP the full conversation ID including ;messageid=XXX
-    // This is required for Teams to reply in the correct thread
     const threadId = this.encodeThreadId({
       conversationId,
       serviceUrl: activity.serviceUrl || "",
@@ -749,7 +472,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       isMe: this.isMessageFromSelf(activity),
     };
 
-    // Process added reactions
     const reactionsAdded = activity.reactionsAdded || [];
     for (const reaction of reactionsAdded) {
       const rawEmoji = reaction.type || "";
@@ -771,10 +493,12 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         messageId,
       });
 
-      this.chat.processReaction({ ...event, adapter: this }, options);
+      this.chat.processReaction(
+        { ...event, adapter: this },
+        this.currentWebhookOptions
+      );
     }
 
-    // Process removed reactions
     const reactionsRemoved = activity.reactionsRemoved || [];
     for (const reaction of reactionsRemoved) {
       const rawEmoji = reaction.type || "";
@@ -796,7 +520,10 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         messageId,
       });
 
-      this.chat.processReaction({ ...event, adapter: this }, options);
+      this.chat.processReaction(
+        { ...event, adapter: this },
+        this.currentWebhookOptions
+      );
     }
   }
 
@@ -804,9 +531,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     activity: Activity,
     threadId: string
   ): Message<unknown> {
-    const text = activity.text || "";
-    // Normalize mentions - format converter will convert <at>name</at> to @name
-    const normalizedText = this.normalizeMentions(text, activity);
+    const text = (activity as MessageActivity).text || "";
+    const normalizedText = this.normalizeMentions(text);
 
     const isMe = this.isMessageFromSelf(activity);
 
@@ -820,7 +546,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         userId: activity.from?.id || "unknown",
         userName: activity.from?.name || "unknown",
         fullName: activity.from?.name || "unknown",
-        isBot: activity.from?.role === "bot",
+        isBot: false, // TeamsSDK doesn't expose role directly; we check isMe instead
         isMe,
       },
       metadata: {
@@ -829,23 +555,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           : new Date(),
         edited: false,
       },
-      attachments: (activity.attachments || [])
+      attachments: ((activity as MessageActivity).attachments || [])
         .filter(
           (att) =>
-            // Filter out adaptive cards (handled separately as cards, not attachments)
             att.contentType !== "application/vnd.microsoft.card.adaptive" &&
-            // Filter out text/html without contentUrl - this is just the formatted
-            // version of the message text, not an actual file attachment.
-            // Real HTML file attachments would have a contentUrl.
             !(att.contentType === "text/html" && !att.contentUrl)
         )
         .map((att) => this.createAttachment(att)),
     });
   }
 
-  /**
-   * Create an Attachment object from a Teams attachment.
-   */
   private createAttachment(att: {
     contentType?: string;
     contentUrl?: string;
@@ -853,7 +572,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   }): Attachment {
     const url = att.contentUrl;
 
-    // Determine type based on contentType
     let type: Attachment["type"] = "file";
     if (att.contentType?.startsWith("image/")) {
       type = "image";
@@ -884,109 +602,151 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     };
   }
 
-  private normalizeMentions(text: string, _activity: Activity): string {
-    // Don't strip mentions - the format converter will convert <at>name</at> to @name
-    // Just trim any leading/trailing whitespace that might result from mention placement
+  private normalizeMentions(text: string): string {
     return text.trim();
+  }
+
+  async initialize(chat: ChatInstance): Promise<void> {
+    this.chat = chat;
+    this.registerEventHandlers();
+    await this.app.initialize();
+  }
+
+  async handleWebhook(
+    request: Request,
+    options?: WebhookOptions
+  ): Promise<Response> {
+    const body = await request.text();
+    this.logger.debug("Teams webhook raw body", { body });
+
+    let parsedBody: unknown;
+    try {
+      parsedBody = JSON.parse(body);
+    } catch (e) {
+      this.logger.error("Failed to parse request body", { error: e });
+      return new Response("Invalid JSON", { status: 400 });
+    }
+
+    // Build IHttpServerRequest for the bridge adapter
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, key) => {
+      headers[key] = value;
+    });
+
+    const serverRequest: IHttpServerRequest = {
+      body: parsedBody,
+      headers,
+    };
+
+    // Store webhook options for handler access
+    this.currentWebhookOptions = options;
+
+    try {
+      const serverResponse = await this.bridgeAdapter.dispatch(serverRequest);
+
+      return new Response(
+        serverResponse.body ? JSON.stringify(serverResponse.body) : "{}",
+        {
+          status: serverResponse.status,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    } catch (error) {
+      this.logger.error("Bridge adapter dispatch error", { error });
+      return new Response(JSON.stringify({ error: "Internal error" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    } finally {
+      this.currentWebhookOptions = undefined;
+    }
+  }
+
+  /**
+   * Get the appropriate API client for outbound operations.
+   * During webhook turns, uses the context's request-scoped API (correct serviceUrl).
+   * For proactive sends, uses the app-level API.
+   */
+  private get api() {
+    return this.app.api;
   }
 
   async postMessage(
     threadId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage<unknown>> {
-    const { conversationId, serviceUrl } = this.decodeThreadId(threadId);
+    const { conversationId } = this.decodeThreadId(threadId);
 
-    // Check for files to upload
     const files = extractFiles(message);
     const fileAttachments =
       files.length > 0 ? await this.filesToAttachments(files) : [];
 
-    // Check if message contains a card
     const card = extractCard(message);
-    let activity: Partial<Activity>;
 
     if (card) {
-      // Render card as Adaptive Card
       const adaptiveCard = cardToAdaptiveCard(card);
+      const activity = new MessageActivity();
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+        ...fileAttachments,
+      ];
 
-      activity = {
-        type: ActivityTypes.Message,
-        // Don't include text - Teams shows both text and card if text is present
-        attachments: [
-          {
-            contentType: "application/vnd.microsoft.card.adaptive",
-            content: adaptiveCard,
-          },
-          ...fileAttachments,
-        ],
-      };
-
-      this.logger.debug("Teams API: sendActivity (adaptive card)", {
+      this.logger.debug("Teams API: send (adaptive card)", {
         conversationId,
-        serviceUrl,
         fileCount: fileAttachments.length,
       });
-    } else {
-      // Regular text message
-      const text = convertEmojiPlaceholders(
-        this.formatConverter.renderPostable(message),
-        "teams"
-      );
 
-      activity = {
-        type: ActivityTypes.Message,
-        text,
-        textFormat: "markdown",
-        attachments: fileAttachments.length > 0 ? fileAttachments : undefined,
-      };
+      try {
+        const sent = await this.app.send(conversationId, activity);
 
-      this.logger.debug("Teams API: sendActivity (message)", {
-        conversationId,
-        serviceUrl,
-        textLength: text.length,
-        fileCount: fileAttachments.length,
-      });
+        return {
+          id: sent.id || "",
+          threadId,
+          raw: activity,
+        };
+      } catch (error) {
+        this.logger.error("Teams API: send failed", { conversationId, error });
+        this.handleTeamsError(error, "postMessage");
+      }
     }
 
-    // Use the adapter to send the message
-    const conversationReference = {
-      channelId: "msteams",
-      serviceUrl,
-      conversation: { id: conversationId },
-    };
+    // Regular text message
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
 
-    let messageId = "";
+    const activity = new MessageActivity(text);
+    activity.textFormat = "markdown";
+    if (fileAttachments.length > 0) {
+      activity.attachments = fileAttachments;
+    }
+
+    this.logger.debug("Teams API: send (message)", {
+      conversationId,
+      textLength: text.length,
+      fileCount: fileAttachments.length,
+    });
 
     try {
-      await this.botAdapter.continueConversationAsync(
-        this.config.appId,
-        conversationReference as Partial<ConversationReference>,
-        async (context) => {
-          const response = await context.sendActivity(activity);
-          messageId = response?.id || "";
-        }
-      );
+      const sent = await this.app.send(conversationId, activity);
+
+      this.logger.debug("Teams API: send response", { messageId: sent.id });
+
+      return {
+        id: sent.id || "",
+        threadId,
+        raw: activity,
+      };
     } catch (error) {
-      this.logger.error("Teams API: sendActivity failed", {
-        conversationId,
-        error,
-      });
+      this.logger.error("Teams API: send failed", { conversationId, error });
       this.handleTeamsError(error, "postMessage");
     }
-
-    this.logger.debug("Teams API: sendActivity response", { messageId });
-
-    return {
-      id: messageId,
-      threadId,
-      raw: activity,
-    };
   }
 
-  /**
-   * Convert files to Teams attachments.
-   * Uses inline data URIs for small files.
-   */
   private async filesToAttachments(
     files: FileUpload[]
   ): Promise<Array<{ contentType: string; contentUrl: string; name: string }>> {
@@ -997,7 +757,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     }> = [];
 
     for (const file of files) {
-      // Convert data to Buffer using shared utility
       const buffer = await toBuffer(file.data, {
         platform: "teams",
         throwOnUnsupported: false,
@@ -1006,7 +765,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         continue;
       }
 
-      // Create data URI using shared utility
       const mimeType = file.mimeType || "application/octet-stream";
       const dataUri = bufferToDataUri(buffer, mimeType);
 
@@ -1025,67 +783,59 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     messageId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage<unknown>> {
-    const { conversationId, serviceUrl } = this.decodeThreadId(threadId);
+    const { conversationId } = this.decodeThreadId(threadId);
 
-    // Check if message contains a card
     const card = extractCard(message);
-    let activity: Partial<Activity>;
 
     if (card) {
-      // Render card as Adaptive Card
       const adaptiveCard = cardToAdaptiveCard(card);
-
-      activity = {
-        id: messageId,
-        type: ActivityTypes.Message,
-        // Don't include text - Teams shows both text and card if text is present
-        attachments: [
-          {
-            contentType: "application/vnd.microsoft.card.adaptive",
-            content: adaptiveCard,
-          },
-        ],
-      };
+      const activity = new MessageActivity();
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+      ];
 
       this.logger.debug("Teams API: updateActivity (adaptive card)", {
         conversationId,
         messageId,
       });
-    } else {
-      // Regular text message
-      const text = convertEmojiPlaceholders(
-        this.formatConverter.renderPostable(message),
-        "teams"
-      );
 
-      activity = {
-        id: messageId,
-        type: ActivityTypes.Message,
-        text,
-        textFormat: "markdown",
-      };
+      try {
+        await this.api.conversations
+          .activities(conversationId)
+          .update(messageId, activity);
+      } catch (error) {
+        this.logger.error("Teams API: updateActivity failed", {
+          conversationId,
+          messageId,
+          error,
+        });
+        this.handleTeamsError(error, "editMessage");
+      }
 
-      this.logger.debug("Teams API: updateActivity", {
-        conversationId,
-        messageId,
-        textLength: text.length,
-      });
+      return { id: messageId, threadId, raw: activity };
     }
 
-    const conversationReference = {
-      channelId: "msteams",
-      serviceUrl,
-      conversation: { id: conversationId },
-    };
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
+
+    const activity = new MessageActivity(text);
+    activity.textFormat = "markdown";
+
+    this.logger.debug("Teams API: updateActivity", {
+      conversationId,
+      messageId,
+      textLength: text.length,
+    });
 
     try {
-      await this.botAdapter.continueConversationAsync(
-        this.config.appId,
-        conversationReference as Partial<ConversationReference>,
-        async (context) => {
-          await context.updateActivity(activity);
-        }
-      );
+      await this.api.conversations
+        .activities(conversationId)
+        .update(messageId, activity);
     } catch (error) {
       this.logger.error("Teams API: updateActivity failed", {
         conversationId,
@@ -1097,21 +847,11 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
 
     this.logger.debug("Teams API: updateActivity response", { ok: true });
 
-    return {
-      id: messageId,
-      threadId,
-      raw: activity,
-    };
+    return { id: messageId, threadId, raw: activity };
   }
 
   async deleteMessage(threadId: string, messageId: string): Promise<void> {
-    const { conversationId, serviceUrl } = this.decodeThreadId(threadId);
-
-    const conversationReference = {
-      channelId: "msteams",
-      serviceUrl,
-      conversation: { id: conversationId },
-    };
+    const { conversationId } = this.decodeThreadId(threadId);
 
     this.logger.debug("Teams API: deleteActivity", {
       conversationId,
@@ -1119,13 +859,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     });
 
     try {
-      await this.botAdapter.continueConversationAsync(
-        this.config.appId,
-        conversationReference as Partial<ConversationReference>,
-        async (context) => {
-          await context.deleteActivity(messageId);
-        }
-      );
+      await this.api.conversations.activities(conversationId).delete(messageId);
     } catch (error) {
       this.logger.error("Teams API: deleteActivity failed", {
         conversationId,
@@ -1139,66 +873,126 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   }
 
   async addReaction(
-    _threadId: string,
-    _messageId: string,
-    _emoji: EmojiValue | string
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string
   ): Promise<void> {
-    throw new NotImplementedError(
-      "Teams Bot Framework does not expose reaction APIs",
-      "addReaction"
-    );
+    const { conversationId } = this.decodeThreadId(threadId);
+    const reactionType = typeof emoji === "string" ? emoji : emoji.name;
+
+    this.logger.debug("Teams API: addReaction", {
+      conversationId,
+      messageId,
+      reactionType,
+    });
+
+    try {
+      await this.api.reactions.add(
+        conversationId,
+        messageId,
+        reactionType as MessageReactionType
+      );
+    } catch (error) {
+      this.logger.error("Teams API: addReaction failed", {
+        conversationId,
+        messageId,
+        error,
+      });
+      this.handleTeamsError(error, "addReaction");
+    }
   }
 
   async removeReaction(
-    _threadId: string,
-    _messageId: string,
-    _emoji: EmojiValue | string
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string
   ): Promise<void> {
-    throw new NotImplementedError(
-      "Teams Bot Framework does not expose reaction APIs",
-      "removeReaction"
-    );
+    const { conversationId } = this.decodeThreadId(threadId);
+    const reactionType = typeof emoji === "string" ? emoji : emoji.name;
+
+    this.logger.debug("Teams API: removeReaction", {
+      conversationId,
+      messageId,
+      reactionType,
+    });
+
+    try {
+      await this.api.reactions.remove(
+        conversationId,
+        messageId,
+        reactionType as MessageReactionType
+      );
+    } catch (error) {
+      this.logger.error("Teams API: removeReaction failed", {
+        conversationId,
+        messageId,
+        error,
+      });
+      this.handleTeamsError(error, "removeReaction");
+    }
   }
 
   async startTyping(threadId: string, _status?: string): Promise<void> {
-    const { conversationId, serviceUrl } = this.decodeThreadId(threadId);
+    const { conversationId } = this.decodeThreadId(threadId);
 
-    const conversationReference = {
-      channelId: "msteams",
-      serviceUrl,
-      conversation: { id: conversationId },
-    };
-
-    this.logger.debug("Teams API: sendActivity (typing)", { conversationId });
+    this.logger.debug("Teams API: send (typing)", { conversationId });
 
     try {
-      await this.botAdapter.continueConversationAsync(
-        this.config.appId,
-        conversationReference as Partial<ConversationReference>,
-        async (context) => {
-          await context.sendActivity({ type: ActivityTypes.Typing });
-        }
-      );
+      await this.app.send(conversationId, new TypingActivity());
     } catch (error) {
-      this.logger.error("Teams API: sendActivity (typing) failed", {
+      this.logger.error("Teams API: send (typing) failed", {
         conversationId,
         error,
       });
       this.handleTeamsError(error, "startTyping");
     }
 
-    this.logger.debug("Teams API: sendActivity (typing) response", {
-      ok: true,
-    });
+    this.logger.debug("Teams API: send (typing) response", { ok: true });
   }
 
   /**
-   * Open a direct message conversation with a user.
-   * Returns a thread ID that can be used to post messages.
-   *
-   * The serviceUrl and tenantId are automatically resolved from cached user interactions.
-   * If no cached values are found, defaults are used (which may not work for all tenants).
+   * Stream responses via post+edit.
+   * TODO: Use native HttpStream for DMs once @microsoft/teams.apps exports it.
    */
+  async stream(
+    threadId: string,
+    textStream: AsyncIterable<string | StreamChunk>,
+    _options?: StreamOptions
+  ): Promise<RawMessage<unknown>> {
+    const { conversationId } = this.decodeThreadId(threadId);
+    let accumulated = "";
+    let messageId: string | undefined;
+
+    for await (const chunk of textStream) {
+      let text = "";
+      if (typeof chunk === "string") {
+        text = chunk;
+      } else if (chunk.type === "markdown_text") {
+        text = chunk.text;
+      }
+      if (!text) {
+        continue;
+      }
+
+      accumulated += text;
+
+      if (messageId) {
+        const activity = new MessageActivity(accumulated);
+        activity.textFormat = "markdown";
+        await this.api.conversations
+          .activities(conversationId)
+          .update(messageId, activity);
+      } else {
+        const activity = new MessageActivity(accumulated);
+        activity.textFormat = "markdown";
+        const res = await this.app.send(conversationId, activity);
+        messageId = res.id ?? "";
+      }
+    }
+
+    return { id: messageId ?? "", threadId, raw: { text: accumulated } };
+  }
+
   async openDM(userId: string): Promise<string> {
     // Look up cached serviceUrl and tenantId for this user from state
     const cachedServiceUrl = await this.chat
@@ -1209,8 +1003,9 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       .get<string>(`teams:tenantId:${userId}`);
 
     const serviceUrl =
-      cachedServiceUrl || "https://smba.trafficmanager.net/teams/";
-    // Use cached tenant ID, config tenant ID, or undefined (will fail for multi-tenant)
+      cachedServiceUrl ||
+      this.api.serviceUrl ||
+      "https://smba.trafficmanager.net/teams/";
     const tenantId = cachedTenantId || this.config.appTenantId;
 
     this.logger.debug("Teams: creating 1:1 conversation", {
@@ -1228,55 +1023,86 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       );
     }
 
-    let conversationId = "";
-
-    // Create the 1:1 conversation using createConversationAsync
-    // The conversation ID is captured from within the callback, not from the return value
-    // biome-ignore lint/suspicious/noExplicitAny: BotBuilder types are incomplete
-    await (this.botAdapter as any).createConversationAsync(
-      this.config.appId,
-      "msteams",
-      serviceUrl,
-      "", // empty audience
-      {
+    try {
+      const result = await this.api.conversations.create({
         isGroup: false,
         bot: { id: this.config.appId, name: this.userName },
-        members: [{ id: userId }],
+        // Account requires role/name but Teams API only needs id for DM members
+        members: [{ id: userId, name: "", role: "user" }],
         tenantId,
         channelData: {
           tenant: { id: tenantId },
         },
-      },
-      async (turnContext: TurnContext) => {
-        // Capture the conversation ID from the new context
-        conversationId = turnContext?.activity?.conversation?.id || "";
-        this.logger.debug("Teams: conversation created in callback", {
-          conversationId,
-          activityId: turnContext?.activity?.id,
-        });
-      }
-    );
+      });
 
-    if (!conversationId) {
-      throw new NetworkError(
-        "teams",
-        "Failed to create 1:1 conversation - no ID returned"
-      );
+      const conversationId = result?.id;
+      if (!conversationId) {
+        throw new NetworkError(
+          "teams",
+          "Failed to create 1:1 conversation - no ID returned"
+        );
+      }
+
+      this.logger.debug("Teams: 1:1 conversation created", { conversationId });
+
+      return this.encodeThreadId({
+        conversationId,
+        serviceUrl,
+      });
+    } catch (error) {
+      if (error instanceof ValidationError || error instanceof NetworkError) {
+        throw error;
+      }
+      this.logger.error("Teams: openDM failed", { userId, error });
+      this.handleTeamsError(error, "openDM");
+    }
+  }
+
+  /**
+   * Make a Graph API GET request using the app's Graph client.
+   * Returns the typed response from the Graph API endpoint.
+   */
+  /**
+   * Fetch all replies for a channel message, following pagination.
+   */
+  private async fetchAllChannelReplies(params: {
+    "team-id": string;
+    "channel-id": string;
+    "chatMessage-id": string;
+  }): Promise<GraphMessage[]> {
+    const allReplies: GraphMessage[] = [];
+
+    const firstPage = await this.app.graph.call(
+      teams.channels.messages.replies.list,
+      { ...params, $top: 50 }
+    );
+    allReplies.push(...(firstPage.value || []));
+
+    let nextLink = firstPage["@odata.nextLink"] ?? undefined;
+    while (nextLink) {
+      const page = await this.graphGetNextLink<typeof firstPage>(nextLink);
+      allReplies.push(...(page.value || []));
+      nextLink = page["@odata.nextLink"] ?? undefined;
     }
 
-    this.logger.debug("Teams: 1:1 conversation created", { conversationId });
+    return allReplies;
+  }
 
-    return this.encodeThreadId({
-      conversationId,
-      serviceUrl,
-    });
+  /**
+   * Follow a Graph API @odata.nextLink URL for pagination.
+   * Uses the graph client's HTTP client directly to avoid URL re-encoding issues.
+   */
+  private async graphGetNextLink<T>(nextLinkUrl: string): Promise<T> {
+    // @ts-expect-error — accessing protected `http` on GraphClient for raw nextLink pagination
+    const res = await this.app.graph.http.get<T>(nextLinkUrl);
+    return res.data;
   }
 
   async fetchMessages(
     threadId: string,
     options: FetchOptions = {}
   ): Promise<FetchResult<unknown>> {
-    if (!this.graphClient) {
+    if (!this.config.appTenantId) {
       throw new NotImplementedError(
         "Teams fetchMessages requires appTenantId to be configured for Microsoft Graph API access.",
         "fetchMessages"
@@ -1288,19 +1114,15 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     const cursor = options.cursor;
     const direction = options.direction ?? "backward";
 
-    // Extract message ID for thread filtering (format: "19:xxx@thread.tacv2;messageid=123456")
     const messageIdMatch = conversationId.match(
       SEMICOLON_MESSAGEID_CAPTURE_PATTERN
     );
     const threadMessageId = messageIdMatch?.[1];
-
-    // Strip ;messageid= from conversation ID
     const baseConversationId = conversationId.replace(
       MESSAGEID_STRIP_PATTERN,
       ""
     );
 
-    // Try to get cached channel context for proper thread-level message fetching
     let channelContext: TeamsChannelContext | null = null;
     if (threadMessageId && this.chat) {
       const cachedContext = await this.chat
@@ -1310,12 +1132,9 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         try {
           channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
         } catch {
-          // Invalid cached data, ignore
+          // Invalid cached data
         }
       }
-
-      // Note: Team GUID is cached during webhook handling via TeamsInfo.getTeamDetails()
-      // If no cached context, we'll fall back to the chat endpoint (less accurate for channels)
     }
 
     try {
@@ -1328,8 +1147,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         direction,
       });
 
-      // If we have channel context and a thread message ID, use the channel replies endpoint
-      // This gives us proper thread-level filtering instead of all messages in the channel
       if (channelContext && threadMessageId) {
         return this.fetchChannelThreadMessages(
           channelContext,
@@ -1339,44 +1156,28 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         );
       }
 
-      // Teams conversation IDs:
-      // - Channels: "19:xxx@thread.tacv2"
-      // - Group chats: "19:xxx@thread.v2"
-      // - 1:1 chats: other formats (e.g., "a]xxx", "8:orgid:xxx")
-      // For Graph API, we use /chats/{chat-id}/messages for all chat types
-
-      // Note: Teams Graph API only supports orderby("createdDateTime desc")
-      // Ascending order is not supported, so we work around this limitation.
-      // Also, max page size is 50 messages per request.
-
-      let graphMessages: GraphChatMessage[];
+      let graphMessages: GraphMessage[];
       let hasMoreMessages = false;
 
       if (direction === "forward") {
-        // Forward direction: need to fetch ALL messages to find the oldest ones
-        // since API only supports descending order. Paginate with max 50 per request.
-        const allMessages: GraphChatMessage[] = [];
-        let nextLink: string | undefined;
-        const apiUrl = `/chats/${encodeURIComponent(baseConversationId)}/messages`;
+        const allMessages: GraphMessage[] = [];
 
-        do {
-          const request = nextLink
-            ? this.graphClient.api(nextLink)
-            : this.graphClient
-                .api(apiUrl)
-                .top(50) // Max allowed by Teams API
-                .orderby("createdDateTime desc");
+        const firstPage = await this.app.graph.call(chats.messages.list, {
+          "chat-id": baseConversationId,
+          $top: 50,
+          $orderby: ["createdDateTime desc"],
+        });
+        allMessages.push(...(firstPage.value || []));
 
-          const response = await request.get();
-          const pageMessages = (response.value || []) as GraphChatMessage[];
-          allMessages.push(...pageMessages);
-          nextLink = response["@odata.nextLink"];
-        } while (nextLink);
+        let nextLink = firstPage["@odata.nextLink"] ?? undefined;
+        while (nextLink) {
+          const page = await this.graphGetNextLink<typeof firstPage>(nextLink);
+          allMessages.push(...(page.value || []));
+          nextLink = page["@odata.nextLink"] ?? undefined;
+        }
 
-        // Reverse to get chronological order (oldest first)
         allMessages.reverse();
 
-        // Find starting position based on cursor (cursor is a timestamp)
         let startIndex = 0;
         if (cursor) {
           startIndex = allMessages.findIndex(
@@ -1387,38 +1188,22 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           }
         }
 
-        // Check if there are more messages beyond our slice
         hasMoreMessages = startIndex + limit < allMessages.length;
-        // Take only the requested limit
         graphMessages = allMessages.slice(startIndex, startIndex + limit);
       } else {
-        // Backward direction: simple pagination
-        let request = this.graphClient
-          .api(`/chats/${encodeURIComponent(baseConversationId)}/messages`)
-          .top(limit)
-          .orderby("createdDateTime desc");
-
-        if (cursor) {
-          // Get messages older than cursor
-          request = request.filter(`createdDateTime lt ${cursor}`);
-        }
-
-        const response = await request.get();
-        graphMessages = (response.value || []) as GraphChatMessage[];
-
-        // API returns newest first, reverse to get chronological order
+        const response = await this.app.graph.call(chats.messages.list, {
+          "chat-id": baseConversationId,
+          $top: limit,
+          $orderby: ["createdDateTime desc"],
+          $filter: cursor ? `createdDateTime lt ${cursor}` : undefined,
+        });
+        graphMessages = (response.value || []) as GraphMessage[];
         graphMessages.reverse();
-
-        // We have more if we got a full page
         hasMoreMessages = graphMessages.length >= limit;
       }
 
-      // For group chats (non-channel), filter to only messages from the "thread" onwards.
-      // Teams group chats don't have real threading - the messageid in the conversation ID
-      // is just UI context. We filter by message ID (which is a timestamp) to simulate threading.
       if (threadMessageId && !channelContext) {
         graphMessages = graphMessages.filter((msg) => {
-          // Include messages with ID >= thread message ID (IDs are timestamps)
           return msg.id && msg.id >= threadMessageId;
         });
         this.logger.debug("Filtered group chat messages to thread", {
@@ -1433,54 +1218,53 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         hasMoreMessages,
       });
 
-      const messages = graphMessages.map((msg: GraphChatMessage) => {
-        const isFromBot =
-          msg.from?.application?.id === this.config.appId ||
-          msg.from?.user?.id === this.config.appId;
+      const messages = graphMessages
+        .filter((msg) => msg.id)
+        .map((msg) => {
+          const isFromBot =
+            msg.from?.application?.id === this.config.appId ||
+            msg.from?.user?.id === this.config.appId;
 
-        return new Message({
-          id: msg.id,
-          threadId,
-          text: this.extractTextFromGraphMessage(msg),
-          formatted: this.formatConverter.toAst(
-            this.extractTextFromGraphMessage(msg)
-          ),
-          raw: msg,
-          author: {
-            userId:
-              msg.from?.user?.id || msg.from?.application?.id || "unknown",
-            userName:
-              msg.from?.user?.displayName ||
-              msg.from?.application?.displayName ||
-              "unknown",
-            fullName:
-              msg.from?.user?.displayName ||
-              msg.from?.application?.displayName ||
-              "unknown",
-            isBot: !!msg.from?.application,
-            isMe: isFromBot,
-          },
-          metadata: {
-            dateSent: msg.createdDateTime
-              ? new Date(msg.createdDateTime)
-              : new Date(),
-            edited: !!msg.lastModifiedDateTime,
-          },
-          attachments: this.extractAttachmentsFromGraphMessage(msg),
+          return new Message({
+            id: msg.id as string,
+            threadId,
+            text: this.extractTextFromGraphMessage(msg),
+            formatted: this.formatConverter.toAst(
+              this.extractTextFromGraphMessage(msg)
+            ),
+            raw: msg,
+            author: {
+              userId:
+                msg.from?.user?.id || msg.from?.application?.id || "unknown",
+              userName:
+                msg.from?.user?.displayName ||
+                msg.from?.application?.displayName ||
+                "unknown",
+              fullName:
+                msg.from?.user?.displayName ||
+                msg.from?.application?.displayName ||
+                "unknown",
+              isBot: !!msg.from?.application,
+              isMe: isFromBot,
+            },
+            metadata: {
+              dateSent: msg.createdDateTime
+                ? new Date(msg.createdDateTime)
+                : new Date(),
+              edited: !!msg.lastModifiedDateTime,
+            },
+            attachments: this.extractAttachmentsFromGraphMessage(msg),
+          });
         });
-      });
 
-      // Determine nextCursor based on direction
       let nextCursor: string | undefined;
       if (hasMoreMessages && graphMessages.length > 0) {
         if (direction === "forward") {
-          // Forward: use the newest message's timestamp (last in returned slice)
           const lastMsg = graphMessages.at(-1);
           if (lastMsg?.createdDateTime) {
             nextCursor = lastMsg.createdDateTime;
           }
         } else {
-          // Backward: use the oldest message's timestamp (first in returned array)
           const oldestMsg = graphMessages[0];
           if (oldestMsg?.createdDateTime) {
             nextCursor = oldestMsg.createdDateTime;
@@ -1492,7 +1276,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     } catch (error) {
       this.logger.error("Teams Graph API: fetchMessages error", { error });
 
-      // Check if it's a permission error
       if (error instanceof Error && error.message?.includes("403")) {
         throw new NotImplementedError(
           "Teams fetchMessages requires one of these Azure AD app permissions: ChatMessage.Read.Chat, Chat.Read.All, or Chat.Read.WhereInstalled",
@@ -1504,12 +1287,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     }
   }
 
-  /**
-   * Fetch messages from a Teams channel thread using the channel-specific Graph API endpoint.
-   * This provides proper thread-level filtering by fetching only replies to a specific message.
-   *
-   * Endpoint: GET /teams/{team-id}/channels/{channel-id}/messages/{message-id}/replies
-   */
   private async fetchChannelThreadMessages(
     context: TeamsChannelContext,
     threadMessageId: string,
@@ -1529,23 +1306,18 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       direction,
     });
 
-    // Build the endpoint URLs:
-    // Parent message: /teams/{team-id}/channels/{channel-id}/messages/{message-id}
-    // Replies: /teams/{team-id}/channels/{channel-id}/messages/{message-id}/replies
-    const parentUrl = `/teams/${encodeURIComponent(context.teamId)}/channels/${encodeURIComponent(context.channelId)}/messages/${encodeURIComponent(threadMessageId)}`;
-    const repliesUrl = `${parentUrl}/replies`;
+    const channelMsgParams = {
+      "team-id": context.teamId,
+      "channel-id": context.channelId,
+      "chatMessage-id": threadMessageId,
+    };
 
-    const graphClient = this.graphClient;
-    if (!graphClient) {
-      throw new AuthenticationError("teams", "Graph client not initialized");
-    }
-
-    // Fetch the parent message (the original message that started the thread)
-    let parentMessage: GraphChatMessage | null = null;
+    let parentMessage: GraphMessage | null = null;
     try {
-      parentMessage = (await graphClient
-        .api(parentUrl)
-        .get()) as GraphChatMessage;
+      parentMessage = await this.app.graph.call(
+        teams.channels.messages.get,
+        channelMsgParams
+      );
     } catch (err) {
       this.logger.warn("Failed to fetch parent message", {
         threadMessageId,
@@ -1553,35 +1325,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       });
     }
 
-    let graphMessages: GraphChatMessage[];
+    let graphMessages: GraphMessage[];
     let hasMoreMessages = false;
 
     if (direction === "forward") {
-      // Forward direction: fetch all replies and paginate in chronological order (oldest first)
-      // Graph API returns messages in descending order (newest first), so we must reverse
-      const allReplies: GraphChatMessage[] = [];
-      let nextLink: string | undefined;
-
-      do {
-        const request = nextLink
-          ? graphClient.api(nextLink)
-          : graphClient.api(repliesUrl).top(50);
-
-        const response = await request.get();
-        const pageMessages = (response.value || []) as GraphChatMessage[];
-        allReplies.push(...pageMessages);
-        nextLink = response["@odata.nextLink"];
-      } while (nextLink);
-
-      // Reverse replies to get chronological order (oldest first)
+      const allReplies = await this.fetchAllChannelReplies(channelMsgParams);
       allReplies.reverse();
-
-      // Prepend parent message (it's the oldest - started the thread)
       const allMessages = parentMessage
         ? [parentMessage, ...allReplies]
         : allReplies;
 
-      // Find starting position based on cursor
       let startIndex = 0;
       if (cursor) {
         startIndex = allMessages.findIndex(
@@ -1595,48 +1348,25 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       hasMoreMessages = startIndex + limit < allMessages.length;
       graphMessages = allMessages.slice(startIndex, startIndex + limit);
     } else {
-      // Backward direction: return most recent messages in chronological order
-      // Graph API returns messages in descending order (newest first)
-      const allReplies: GraphChatMessage[] = [];
-      let nextLink: string | undefined;
-
-      do {
-        const request = nextLink
-          ? graphClient.api(nextLink)
-          : graphClient.api(repliesUrl).top(50);
-
-        const response = await request.get();
-        const pageMessages = (response.value || []) as GraphChatMessage[];
-        allReplies.push(...pageMessages);
-        nextLink = response["@odata.nextLink"];
-      } while (nextLink);
-
-      // Reverse replies to get chronological order (oldest first)
+      const allReplies = await this.fetchAllChannelReplies(channelMsgParams);
       allReplies.reverse();
-
-      // Prepend parent message (it's the oldest - started the thread)
       const allMessages = parentMessage
         ? [parentMessage, ...allReplies]
         : allReplies;
 
       if (cursor) {
-        // Find position of cursor (cursor is timestamp of the oldest message in previous batch)
-        // We want messages OLDER than cursor (earlier in chronological order)
         const cursorIndex = allMessages.findIndex(
           (msg) => msg.createdDateTime && msg.createdDateTime >= cursor
         );
         if (cursorIndex > 0) {
-          // Take messages before the cursor position
           const sliceStart = Math.max(0, cursorIndex - limit);
           graphMessages = allMessages.slice(sliceStart, cursorIndex);
           hasMoreMessages = sliceStart > 0;
         } else {
-          // Cursor not found or at start - take the most recent (end of array)
           graphMessages = allMessages.slice(-limit);
           hasMoreMessages = allMessages.length > limit;
         }
       } else {
-        // No cursor - get the most recent messages (end of chronological array)
         graphMessages = allMessages.slice(-limit);
         hasMoreMessages = allMessages.length > limit;
       }
@@ -1648,346 +1378,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       hasMoreMessages,
     });
 
-    const messages = graphMessages.map((msg: GraphChatMessage) => {
-      const isFromBot =
-        msg.from?.application?.id === this.config.appId ||
-        msg.from?.user?.id === this.config.appId;
-
-      return new Message({
-        id: msg.id,
-        threadId,
-        text: this.extractTextFromGraphMessage(msg),
-        formatted: this.formatConverter.toAst(
-          this.extractTextFromGraphMessage(msg)
-        ),
-        raw: msg,
-        author: {
-          userId: msg.from?.user?.id || msg.from?.application?.id || "unknown",
-          userName:
-            msg.from?.user?.displayName ||
-            msg.from?.application?.displayName ||
-            "unknown",
-          fullName:
-            msg.from?.user?.displayName ||
-            msg.from?.application?.displayName ||
-            "unknown",
-          isBot: !!msg.from?.application,
-          isMe: isFromBot,
-        },
-        metadata: {
-          dateSent: msg.createdDateTime
-            ? new Date(msg.createdDateTime)
-            : new Date(),
-          edited: !!msg.lastModifiedDateTime,
-        },
-        attachments: this.extractAttachmentsFromGraphMessage(msg),
-      });
-    });
-
-    // Determine nextCursor
-    let nextCursor: string | undefined;
-    if (hasMoreMessages && graphMessages.length > 0) {
-      if (direction === "forward") {
-        const lastMsg = graphMessages.at(-1);
-        if (lastMsg?.createdDateTime) {
-          nextCursor = lastMsg.createdDateTime;
-        }
-      } else {
-        const oldestMsg = graphMessages[0];
-        if (oldestMsg?.createdDateTime) {
-          nextCursor = oldestMsg.createdDateTime;
-        }
-      }
-    }
-
-    return { messages, nextCursor };
-  }
-
-  /**
-   * Extract plain text from a Graph API message.
-   */
-  private extractTextFromGraphMessage(msg: GraphChatMessage): string {
-    // body.content contains the message text (HTML or text depending on contentType)
-    if (msg.body?.contentType === "text") {
-      return msg.body.content || "";
-    }
-
-    // For HTML content, strip tags (basic implementation)
-    let text = "";
-    if (msg.body?.content) {
-      // Single-pass tag stripping: walk the string and skip anything between < and >
-      // Handles nested/reconstructed tags by iterating only once
-      let stripped = "";
-      let inTag = false;
-      for (const ch of msg.body.content) {
-        if (ch === "<") {
-          inTag = true;
-        } else if (ch === ">") {
-          inTag = false;
-        } else if (!inTag) {
-          stripped += ch;
-        }
-      }
-      text = stripped.trim();
-    }
-
-    // If text is empty but message has adaptive card attachments, try to extract card title
-    if (!text && msg.attachments?.length) {
-      for (const att of msg.attachments) {
-        if (att.contentType === "application/vnd.microsoft.card.adaptive") {
-          try {
-            const card = JSON.parse(att.content || "{}");
-            // Look for title in common locations
-            const title = this.extractCardTitle(card);
-            if (title) {
-              return title;
-            }
-            return "[Card]";
-          } catch {
-            return "[Card]";
-          }
-        }
-      }
-    }
-
-    return text;
-  }
-
-  /**
-   * Extract a title/summary from an Adaptive Card structure.
-   */
-  private extractCardTitle(card: unknown): string | null {
-    if (!card || typeof card !== "object") {
-      return null;
-    }
-
-    const cardObj = card as Record<string, unknown>;
-
-    // Check for body array and find first TextBlock with large/bolder style (likely title)
-    if (Array.isArray(cardObj.body)) {
-      for (const element of cardObj.body) {
-        if (
-          element &&
-          typeof element === "object" &&
-          (element as Record<string, unknown>).type === "TextBlock"
-        ) {
-          const textBlock = element as Record<string, unknown>;
-          // Title blocks often have weight: "bolder" or size: "large"
-          if (
-            textBlock.weight === "bolder" ||
-            textBlock.size === "large" ||
-            textBlock.size === "extraLarge"
-          ) {
-            const text = textBlock.text;
-            if (typeof text === "string") {
-              return text;
-            }
-          }
-        }
-      }
-      // Fallback: just get first TextBlock's text
-      for (const element of cardObj.body) {
-        if (
-          element &&
-          typeof element === "object" &&
-          (element as Record<string, unknown>).type === "TextBlock"
-        ) {
-          const text = (element as Record<string, unknown>).text;
-          if (typeof text === "string") {
-            return text;
-          }
-        }
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Extract attachments from a Graph API message.
-   */
-  private extractAttachmentsFromGraphMessage(
-    msg: GraphChatMessage
-  ): Attachment[] {
-    if (!msg.attachments?.length) {
-      return [];
-    }
-
-    return msg.attachments.map((att) => ({
-      type: att.contentType?.includes("image") ? "image" : "file",
-      name: att.name || undefined,
-      url: att.contentUrl || undefined,
-      mimeType: att.contentType || undefined,
-    }));
-  }
-
-  async fetchThread(threadId: string): Promise<ThreadInfo> {
-    const { conversationId } = this.decodeThreadId(threadId);
-
-    return {
-      id: threadId,
-      channelId: conversationId,
-      metadata: {},
-    };
-  }
-
-  /**
-   * Derive channel ID from a Teams thread ID.
-   * Teams conversation IDs may include ";messageid=XXX" for threading.
-   * Strip the messageid part to get the base channel/conversation.
-   */
-  channelIdFromThreadId(threadId: string): string {
-    const { conversationId, serviceUrl } = this.decodeThreadId(threadId);
-    // Strip ;messageid=XXX from conversation ID
-    const baseConversationId = conversationId.replace(
-      MESSAGEID_STRIP_PATTERN,
-      ""
-    );
-    return this.encodeThreadId({
-      conversationId: baseConversationId,
-      serviceUrl,
-    });
-  }
-
-  /**
-   * Fetch channel-level messages (all messages in the conversation, not filtered by thread).
-   * Uses the Graph API for chat messages.
-   */
-  async fetchChannelMessages(
-    channelId: string,
-    options: FetchOptions = {}
-  ): Promise<FetchResult<unknown>> {
-    if (!this.graphClient) {
-      throw new NotImplementedError(
-        "Teams fetchChannelMessages requires appTenantId for Microsoft Graph API access.",
-        "fetchChannelMessages"
-      );
-    }
-
-    const { conversationId } = this.decodeThreadId(channelId);
-    const baseConversationId = conversationId.replace(
-      MESSAGEID_STRIP_PATTERN,
-      ""
-    );
-    const limit = options.limit || 50;
-    const direction = options.direction ?? "backward";
-
-    try {
-      // Check if we have channel context (team channel vs group chat)
-      let channelContext: TeamsChannelContext | null = null;
-      if (this.chat) {
-        const cachedContext = await this.chat
-          .getState()
-          .get<string>(`teams:channelContext:${baseConversationId}`);
-        if (cachedContext) {
-          try {
-            channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
-          } catch {
-            // Ignore invalid cache
-          }
-        }
-      }
-
-      this.logger.debug("Teams Graph API: fetchChannelMessages", {
-        conversationId: baseConversationId,
-        hasChannelContext: !!channelContext,
-        limit,
-        direction,
-      });
-
-      let graphMessages: GraphChatMessage[];
-      let hasMoreMessages = false;
-
-      if (channelContext) {
-        // Team channel: use /teams/{teamId}/channels/{channelId}/messages
-        const apiUrl = `/teams/${encodeURIComponent(channelContext.teamId)}/channels/${encodeURIComponent(channelContext.channelId)}/messages`;
-
-        if (direction === "forward") {
-          const allMessages: GraphChatMessage[] = [];
-          let nextLink: string | undefined;
-          do {
-            const request = nextLink
-              ? this.graphClient.api(nextLink)
-              : this.graphClient.api(apiUrl).top(50);
-            const response = await request.get();
-            allMessages.push(...((response.value || []) as GraphChatMessage[]));
-            nextLink = response["@odata.nextLink"];
-          } while (nextLink);
-
-          allMessages.reverse();
-          let startIndex = 0;
-          if (options.cursor) {
-            const cursor = options.cursor;
-            startIndex = allMessages.findIndex(
-              (msg) => msg.createdDateTime && msg.createdDateTime > cursor
-            );
-            if (startIndex === -1) {
-              startIndex = allMessages.length;
-            }
-          }
-          hasMoreMessages = startIndex + limit < allMessages.length;
-          graphMessages = allMessages.slice(startIndex, startIndex + limit);
-        } else {
-          const request = this.graphClient.api(apiUrl).top(limit);
-          const response = await request.get();
-          graphMessages = (response.value || []) as GraphChatMessage[];
-          graphMessages.reverse();
-          hasMoreMessages = graphMessages.length >= limit;
-        }
-      } else {
-        // Group chat / 1:1: use /chats/{chatId}/messages
-        const apiUrl = `/chats/${encodeURIComponent(baseConversationId)}/messages`;
-
-        if (direction === "forward") {
-          const allMessages: GraphChatMessage[] = [];
-          let nextLink: string | undefined;
-          do {
-            const request = nextLink
-              ? this.graphClient.api(nextLink)
-              : this.graphClient
-                  .api(apiUrl)
-                  .top(50)
-                  .orderby("createdDateTime desc");
-            const response = await request.get();
-            allMessages.push(...((response.value || []) as GraphChatMessage[]));
-            nextLink = response["@odata.nextLink"];
-          } while (nextLink);
-
-          allMessages.reverse();
-          let startIndex = 0;
-          if (options.cursor) {
-            const cursor = options.cursor;
-            startIndex = allMessages.findIndex(
-              (msg) => msg.createdDateTime && msg.createdDateTime > cursor
-            );
-            if (startIndex === -1) {
-              startIndex = allMessages.length;
-            }
-          }
-          hasMoreMessages = startIndex + limit < allMessages.length;
-          graphMessages = allMessages.slice(startIndex, startIndex + limit);
-        } else {
-          let request = this.graphClient
-            .api(apiUrl)
-            .top(limit)
-            .orderby("createdDateTime desc");
-          if (options.cursor) {
-            request = request.filter(`createdDateTime lt ${options.cursor}`);
-          }
-          const response = await request.get();
-          graphMessages = (response.value || []) as GraphChatMessage[];
-          graphMessages.reverse();
-          hasMoreMessages = graphMessages.length >= limit;
-        }
-      }
-
-      const messages = graphMessages.map((msg) => {
+    const messages = graphMessages
+      .filter((msg) => msg.id)
+      .map((msg) => {
         const isFromBot =
           msg.from?.application?.id === this.config.appId ||
           msg.from?.user?.id === this.config.appId;
+
         return new Message({
-          id: msg.id,
-          threadId: channelId,
+          id: msg.id as string,
+          threadId,
           text: this.extractTextFromGraphMessage(msg),
           formatted: this.formatConverter.toAst(
             this.extractTextFromGraphMessage(msg)
@@ -2016,6 +1416,328 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           attachments: this.extractAttachmentsFromGraphMessage(msg),
         });
       });
+
+    let nextCursor: string | undefined;
+    if (hasMoreMessages && graphMessages.length > 0) {
+      if (direction === "forward") {
+        const lastMsg = graphMessages.at(-1);
+        if (lastMsg?.createdDateTime) {
+          nextCursor = lastMsg.createdDateTime;
+        }
+      } else {
+        const oldestMsg = graphMessages[0];
+        if (oldestMsg?.createdDateTime) {
+          nextCursor = oldestMsg.createdDateTime;
+        }
+      }
+    }
+
+    return { messages, nextCursor };
+  }
+
+  private extractTextFromGraphMessage(msg: GraphMessage): string {
+    if (msg.body?.contentType === "text") {
+      return msg.body.content || "";
+    }
+
+    let text = "";
+    if (msg.body?.content) {
+      let stripped = "";
+      let inTag = false;
+      for (const ch of msg.body.content) {
+        if (ch === "<") {
+          inTag = true;
+        } else if (ch === ">") {
+          inTag = false;
+        } else if (!inTag) {
+          stripped += ch;
+        }
+      }
+      text = stripped.trim();
+    }
+
+    if (!text && msg.attachments?.length) {
+      for (const att of msg.attachments) {
+        if (att.contentType === "application/vnd.microsoft.card.adaptive") {
+          try {
+            const card = JSON.parse(att.content || "{}");
+            const title = this.extractCardTitle(card);
+            if (title) {
+              return title;
+            }
+            return "[Card]";
+          } catch {
+            return "[Card]";
+          }
+        }
+      }
+    }
+
+    return text;
+  }
+
+  private extractCardTitle(card: unknown): string | null {
+    if (!card || typeof card !== "object") {
+      return null;
+    }
+
+    const cardObj = card as Record<string, unknown>;
+
+    if (Array.isArray(cardObj.body)) {
+      for (const element of cardObj.body) {
+        if (
+          element &&
+          typeof element === "object" &&
+          (element as Record<string, unknown>).type === "TextBlock"
+        ) {
+          const textBlock = element as Record<string, unknown>;
+          if (
+            textBlock.weight === "bolder" ||
+            textBlock.size === "large" ||
+            textBlock.size === "extraLarge"
+          ) {
+            const text = textBlock.text;
+            if (typeof text === "string") {
+              return text;
+            }
+          }
+        }
+      }
+      for (const element of cardObj.body) {
+        if (
+          element &&
+          typeof element === "object" &&
+          (element as Record<string, unknown>).type === "TextBlock"
+        ) {
+          const text = (element as Record<string, unknown>).text;
+          if (typeof text === "string") {
+            return text;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private extractAttachmentsFromGraphMessage(msg: GraphMessage): Attachment[] {
+    if (!msg.attachments?.length) {
+      return [];
+    }
+
+    return msg.attachments.map(
+      (att: {
+        contentType?: string | null;
+        contentUrl?: string | null;
+        name?: string | null;
+      }) => ({
+        type: att.contentType?.includes("image") ? "image" : "file",
+        name: att.name ?? undefined,
+        url: att.contentUrl ?? undefined,
+        mimeType: att.contentType ?? undefined,
+      })
+    );
+  }
+
+  async fetchThread(threadId: string): Promise<ThreadInfo> {
+    const { conversationId } = this.decodeThreadId(threadId);
+
+    return {
+      id: threadId,
+      channelId: conversationId,
+      metadata: {},
+    };
+  }
+
+  channelIdFromThreadId(threadId: string): string {
+    const { conversationId, serviceUrl } = this.decodeThreadId(threadId);
+    const baseConversationId = conversationId.replace(
+      MESSAGEID_STRIP_PATTERN,
+      ""
+    );
+    return this.encodeThreadId({
+      conversationId: baseConversationId,
+      serviceUrl,
+    });
+  }
+
+  async fetchChannelMessages(
+    channelId: string,
+    options: FetchOptions = {}
+  ): Promise<FetchResult<unknown>> {
+    if (!this.config.appTenantId) {
+      throw new NotImplementedError(
+        "Teams fetchChannelMessages requires appTenantId for Microsoft Graph API access.",
+        "fetchChannelMessages"
+      );
+    }
+
+    const { conversationId } = this.decodeThreadId(channelId);
+    const baseConversationId = conversationId.replace(
+      MESSAGEID_STRIP_PATTERN,
+      ""
+    );
+    const limit = options.limit || 50;
+    const direction = options.direction ?? "backward";
+
+    try {
+      let channelContext: TeamsChannelContext | null = null;
+      if (this.chat) {
+        const cachedContext = await this.chat
+          .getState()
+          .get<string>(`teams:channelContext:${baseConversationId}`);
+        if (cachedContext) {
+          try {
+            channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
+          } catch {
+            // Ignore
+          }
+        }
+      }
+
+      this.logger.debug("Teams Graph API: fetchChannelMessages", {
+        conversationId: baseConversationId,
+        hasChannelContext: !!channelContext,
+        limit,
+        direction,
+      });
+
+      let graphMessages: GraphMessage[];
+      let hasMoreMessages = false;
+
+      if (channelContext) {
+        const channelParams = {
+          "team-id": channelContext.teamId,
+          "channel-id": channelContext.channelId,
+        };
+
+        if (direction === "forward") {
+          const allMessages: GraphMessage[] = [];
+          const firstPage = await this.app.graph.call(
+            teams.channels.messages.list,
+            {
+              ...channelParams,
+              $top: 50,
+            }
+          );
+          allMessages.push(...(firstPage.value || []));
+          let nextLink = firstPage["@odata.nextLink"] ?? undefined;
+          while (nextLink) {
+            const page = await this.graphGetNextLink<{
+              value: GraphMessage[];
+              "@odata.nextLink"?: string;
+            }>(nextLink);
+            allMessages.push(...(page.value || []));
+            nextLink = page["@odata.nextLink"] ?? undefined;
+          }
+
+          allMessages.reverse();
+          let startIndex = 0;
+          if (options.cursor) {
+            const cursorVal = options.cursor;
+            startIndex = allMessages.findIndex(
+              (msg) => msg.createdDateTime && msg.createdDateTime > cursorVal
+            );
+            if (startIndex === -1) {
+              startIndex = allMessages.length;
+            }
+          }
+          hasMoreMessages = startIndex + limit < allMessages.length;
+          graphMessages = allMessages.slice(startIndex, startIndex + limit);
+        } else {
+          const response = await this.app.graph.call(
+            teams.channels.messages.list,
+            {
+              ...channelParams,
+              $top: limit,
+            }
+          );
+          graphMessages = (response.value || []) as GraphMessage[];
+          graphMessages.reverse();
+          hasMoreMessages = graphMessages.length >= limit;
+        }
+      } else if (direction === "forward") {
+        const allMessages: GraphMessage[] = [];
+        const firstPage = await this.app.graph.call(chats.messages.list, {
+          "chat-id": baseConversationId,
+          $top: 50,
+          $orderby: ["createdDateTime desc"],
+        });
+        allMessages.push(...(firstPage.value || []));
+        let nextLink = firstPage["@odata.nextLink"] ?? undefined;
+        while (nextLink) {
+          const page = await this.graphGetNextLink<{
+            value: GraphMessage[];
+            "@odata.nextLink"?: string;
+          }>(nextLink);
+          allMessages.push(...(page.value || []));
+          nextLink = page["@odata.nextLink"] ?? undefined;
+        }
+
+        allMessages.reverse();
+        let startIndex = 0;
+        if (options.cursor) {
+          const cursorVal = options.cursor;
+          startIndex = allMessages.findIndex(
+            (msg) => msg.createdDateTime && msg.createdDateTime > cursorVal
+          );
+          if (startIndex === -1) {
+            startIndex = allMessages.length;
+          }
+        }
+        hasMoreMessages = startIndex + limit < allMessages.length;
+        graphMessages = allMessages.slice(startIndex, startIndex + limit);
+      } else {
+        const response = await this.app.graph.call(chats.messages.list, {
+          "chat-id": baseConversationId,
+          $top: limit,
+          $orderby: ["createdDateTime desc"],
+          $filter: options.cursor
+            ? `createdDateTime lt ${options.cursor}`
+            : undefined,
+        });
+        graphMessages = (response.value || []) as GraphMessage[];
+        graphMessages.reverse();
+        hasMoreMessages = graphMessages.length >= limit;
+      }
+
+      const messages = graphMessages
+        .filter((msg) => msg.id)
+        .map((msg) => {
+          const isFromBot =
+            msg.from?.application?.id === this.config.appId ||
+            msg.from?.user?.id === this.config.appId;
+          return new Message({
+            id: msg.id as string,
+            threadId: channelId,
+            text: this.extractTextFromGraphMessage(msg),
+            formatted: this.formatConverter.toAst(
+              this.extractTextFromGraphMessage(msg)
+            ),
+            raw: msg,
+            author: {
+              userId:
+                msg.from?.user?.id || msg.from?.application?.id || "unknown",
+              userName:
+                msg.from?.user?.displayName ||
+                msg.from?.application?.displayName ||
+                "unknown",
+              fullName:
+                msg.from?.user?.displayName ||
+                msg.from?.application?.displayName ||
+                "unknown",
+              isBot: !!msg.from?.application,
+              isMe: isFromBot,
+            },
+            metadata: {
+              dateSent: msg.createdDateTime
+                ? new Date(msg.createdDateTime)
+                : new Date(),
+              edited: !!msg.lastModifiedDateTime,
+            },
+            attachments: this.extractAttachmentsFromGraphMessage(msg),
+          });
+        });
 
       let nextCursor: string | undefined;
       if (hasMoreMessages && graphMessages.length > 0) {
@@ -2041,16 +1763,11 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     }
   }
 
-  /**
-   * List threads in a Teams channel.
-   * For team channels, fetches messages and filters for those with replies.
-   * For group chats, threads are based on message IDs in conversation references.
-   */
   async listThreads(
     channelId: string,
     options: ListThreadsOptions = {}
   ): Promise<ListThreadsResult<unknown>> {
-    if (!this.graphClient) {
+    if (!this.config.appTenantId) {
       throw new NotImplementedError(
         "Teams listThreads requires appTenantId for Microsoft Graph API access.",
         "listThreads"
@@ -2065,7 +1782,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     const limit = options.limit || 50;
 
     try {
-      // Check for channel context
       let channelContext: TeamsChannelContext | null = null;
       if (this.chat) {
         const cachedContext = await this.chat
@@ -2089,12 +1805,15 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       const threads: ThreadSummary[] = [];
 
       if (channelContext) {
-        // Team channel: fetch messages and find those with replies
-        const apiUrl = `/teams/${encodeURIComponent(channelContext.teamId)}/channels/${encodeURIComponent(channelContext.channelId)}/messages`;
-        const response = await this.graphClient.api(apiUrl).top(limit).get();
-        const messages = (response.value || []) as (GraphChatMessage & {
-          replies?: GraphChatMessage[];
-        })[];
+        const response = await this.app.graph.call(
+          teams.channels.messages.list,
+          {
+            "team-id": channelContext.teamId,
+            "channel-id": channelContext.channelId,
+            $top: limit,
+          }
+        );
+        const messages = response.value || [];
 
         for (const msg of messages) {
           if (!msg.id) {
@@ -2112,7 +1831,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           threads.push({
             id: threadId,
             rootMessage: new Message({
-              id: msg.id,
+              id: msg.id as string,
               threadId,
               text: this.extractTextFromGraphMessage(msg),
               formatted: this.formatConverter.toAst(
@@ -2147,15 +1866,12 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           });
         }
       } else {
-        // Group chat: list recent messages as "threads"
-        const apiUrl = `/chats/${encodeURIComponent(baseConversationId)}/messages`;
-        const response = await this.graphClient
-          .api(apiUrl)
-          .top(limit)
-          .orderby("createdDateTime desc")
-          .get();
-
-        const messages = (response.value || []) as GraphChatMessage[];
+        const response = await this.app.graph.call(chats.messages.list, {
+          "chat-id": baseConversationId,
+          $top: limit,
+          $orderby: ["createdDateTime desc"],
+        });
+        const messages = response.value || [];
 
         for (const msg of messages) {
           if (!msg.id) {
@@ -2173,7 +1889,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           threads.push({
             id: threadId,
             rootMessage: new Message({
-              id: msg.id,
+              id: msg.id as string,
               threadId,
               text: this.extractTextFromGraphMessage(msg),
               formatted: this.formatConverter.toAst(
@@ -2217,9 +1933,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     }
   }
 
-  /**
-   * Fetch Teams channel/conversation info.
-   */
   async fetchChannelInfo(channelId: string): Promise<ChannelInfo> {
     const { conversationId } = this.decodeThreadId(channelId);
     const baseConversationId = conversationId.replace(
@@ -2227,7 +1940,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       ""
     );
 
-    // Check for channel context
     let channelContext: TeamsChannelContext | null = null;
     if (this.chat) {
       const cachedContext = await this.chat
@@ -2242,24 +1954,23 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       }
     }
 
-    if (channelContext && this.graphClient) {
+    if (channelContext && this.config.appTenantId) {
       try {
         this.logger.debug("Teams Graph API: GET channel info", {
           teamId: channelContext.teamId,
           channelId: channelContext.channelId,
         });
 
-        const response = await this.graphClient
-          .api(
-            `/teams/${encodeURIComponent(channelContext.teamId)}/channels/${encodeURIComponent(channelContext.channelId)}`
-          )
-          .get();
+        const response = await this.app.graph.call(teams.channels.get, {
+          "team-id": channelContext.teamId,
+          "channel-id": channelContext.channelId,
+        });
 
         return {
           id: channelId,
           name: response.displayName,
           isDM: false,
-          memberCount: response.memberCount,
+          memberCount: (response as { memberCount?: number }).memberCount,
           metadata: {
             membershipType: response.membershipType,
             description: response.description,
@@ -2271,7 +1982,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       }
     }
 
-    // Fallback for group chats or when Graph API is not available
     return {
       id: channelId,
       isDM: this.isDM(channelId),
@@ -2281,16 +1991,11 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     };
   }
 
-  /**
-   * Post a message to the channel top-level (not in a thread).
-   * Uses a conversation reference without ;messageid= to post at the top level.
-   */
   async postChannelMessage(
     channelId: string,
     message: AdapterPostableMessage
   ): Promise<RawMessage<unknown>> {
-    const { conversationId, serviceUrl } = this.decodeThreadId(channelId);
-    // Ensure we use the base conversation ID (no messageid)
+    const { conversationId } = this.decodeThreadId(channelId);
     const baseConversationId = conversationId.replace(
       MESSAGEID_STRIP_PATTERN,
       ""
@@ -2301,50 +2006,46 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       files.length > 0 ? await this.filesToAttachments(files) : [];
 
     const card = extractCard(message);
-    let activity: Partial<Activity>;
 
     if (card) {
       const adaptiveCard = cardToAdaptiveCard(card);
-      activity = {
-        type: ActivityTypes.Message,
-        attachments: [
-          {
-            contentType: "application/vnd.microsoft.card.adaptive",
-            content: adaptiveCard,
-          },
-          ...fileAttachments,
-        ],
-      };
-    } else {
-      const text = convertEmojiPlaceholders(
-        this.formatConverter.renderPostable(message),
-        "teams"
-      );
-      activity = {
-        type: ActivityTypes.Message,
-        text,
-        textFormat: "markdown",
-        attachments: fileAttachments.length > 0 ? fileAttachments : undefined,
-      };
+      const activity = new MessageActivity();
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+        ...fileAttachments,
+      ];
+
+      try {
+        const sent = await this.app.send(baseConversationId, activity);
+        return { id: sent.id || "", threadId: channelId, raw: activity };
+      } catch (error) {
+        this.logger.error("Teams API: postChannelMessage failed", {
+          conversationId: baseConversationId,
+          error,
+        });
+        this.handleTeamsError(error, "postChannelMessage");
+      }
     }
 
-    const conversationReference = {
-      channelId: "msteams",
-      serviceUrl,
-      conversation: { id: baseConversationId },
-    };
-
-    let messageId = "";
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
+    const activity = new MessageActivity(text);
+    activity.textFormat = "markdown";
+    if (fileAttachments.length > 0) {
+      activity.attachments = fileAttachments;
+    }
 
     try {
-      await this.botAdapter.continueConversationAsync(
-        this.config.appId,
-        conversationReference as Partial<ConversationReference>,
-        async (context) => {
-          const response = await context.sendActivity(activity);
-          messageId = response?.id || "";
-        }
-      );
+      const sent = await this.app.send(baseConversationId, activity);
+      this.logger.debug("Teams API: postChannelMessage response", {
+        messageId: sent.id,
+      });
+      return { id: sent.id || "", threadId: channelId, raw: activity };
     } catch (error) {
       this.logger.error("Teams API: postChannelMessage failed", {
         conversationId: baseConversationId,
@@ -2352,18 +2053,9 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       });
       this.handleTeamsError(error, "postChannelMessage");
     }
-
-    this.logger.debug("Teams API: postChannelMessage response", { messageId });
-
-    return {
-      id: messageId,
-      threadId: channelId,
-      raw: activity,
-    };
   }
 
   encodeThreadId(platformData: TeamsThreadId): string {
-    // Base64 encode both since conversationId and serviceUrl can contain special characters
     const encodedConversationId = Buffer.from(
       platformData.conversationId
     ).toString("base64url");
@@ -2373,13 +2065,8 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     return `teams:${encodedConversationId}:${encodedServiceUrl}`;
   }
 
-  /**
-   * Check if a thread is a direct message conversation.
-   * Teams DMs have conversation IDs that don't start with "19:" (which is for groups/channels).
-   */
   isDM(threadId: string): boolean {
     const { conversationId } = this.decodeThreadId(threadId);
-    // Group chats and channels start with "19:", DMs don't
     return !conversationId.startsWith("19:");
   }
 
@@ -2410,29 +2097,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     return this.parseTeamsMessage(activity, threadId);
   }
 
-  /**
-   * Check if a Teams activity is from this bot.
-   *
-   * Teams bot IDs can appear in different formats:
-   * - Just the app ID: "abc123-def456-..."
-   * - With prefix: "28:abc123-def456-..."
-   *
-   * We check both exact match and suffix match (after colon delimiter)
-   * to handle all formats safely.
-   */
   private isMessageFromSelf(activity: Activity): boolean {
     const fromId = activity.from?.id;
     if (!(fromId && this.config.appId)) {
       return false;
     }
 
-    // Exact match (bot ID is just the app ID)
     if (fromId === this.config.appId) {
       return true;
     }
 
-    // Teams format: "28:{appId}" or similar prefix patterns
-    // Check if it ends with our appId after a colon delimiter
     if (fromId.endsWith(`:${this.config.appId}`)) {
       return true;
     }
@@ -2444,16 +2118,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     return this.formatConverter.fromAst(content);
   }
 
-  /**
-   * Convert Teams/BotBuilder errors to standardized AdapterError types.
-   */
   private handleTeamsError(error: unknown, operation: string): never {
-    // Handle BotBuilder errors with status codes
     if (error && typeof error === "object") {
       const err = error as Record<string, unknown>;
 
-      // Check for HTTP status code
+      // Check for TeamsSDK HttpError shape: innerHttpError.statusCode
+      const innerError = err.innerHttpError as
+        | Record<string, unknown>
+        | undefined;
       const statusCode =
+        (innerError?.statusCode as number) ||
         (err.statusCode as number) ||
         (err.status as number) ||
         (err.code as number);
@@ -2479,7 +2153,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         throw new AdapterRateLimitError("teams", retryAfter);
       }
 
-      // Permission errors
       if (
         statusCode === 403 ||
         (err.message &&
@@ -2489,7 +2162,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
         throw new PermissionError("teams", operation);
       }
 
-      // Generic error with message
       if (err.message && typeof err.message === "string") {
         throw new NetworkError(
           "teams",
@@ -2499,7 +2171,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       }
     }
 
-    // Fallback for unknown error types
     throw new NetworkError(
       "teams",
       `Teams API error during ${operation}: ${String(error)}`,

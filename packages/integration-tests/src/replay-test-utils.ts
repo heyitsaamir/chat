@@ -318,7 +318,7 @@ export interface TeamsTestContext {
  * Create a Teams test context with standard setup.
  */
 export function createTeamsTestContext(
-  fixtures: { botName: string; appId?: string },
+  fixtures: { botName: string; appId?: string; appTenantId?: string },
   handlers: {
     onMention?: (thread: Thread, message: Message) => void | Promise<void>;
     onSubscribed?: (thread: Thread, message: Message) => void | Promise<void>;
@@ -330,6 +330,7 @@ export function createTeamsTestContext(
   const adapter = createTeamsAdapter({
     appId,
     appPassword: TEAMS_APP_PASSWORD,
+    appTenantId: fixtures.appTenantId || "test-tenant-id",
     userName: fixtures.botName,
     logger: mockLogger,
   });
