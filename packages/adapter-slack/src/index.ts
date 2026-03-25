@@ -16,6 +16,7 @@ import type {
   AdapterPostableMessage,
   Attachment,
   ChannelInfo,
+  ChannelVisibility,
   ChatInstance,
   EmojiValue,
   EphemeralMessage,
@@ -269,6 +270,8 @@ interface SlackWebhookPayload {
     | SlackUserChangeEvent;
   event_id?: string;
   event_time?: number;
+  /** Whether this event occurred in an externally shared channel (Slack Connect) */
+  is_ext_shared_channel?: boolean;
   team_id?: string;
   type: string;
 }
@@ -375,6 +378,12 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
   private static CHANNEL_CACHE_TTL_MS = 8 * 24 * 60 * 60 * 1000; // 8 days
   private static REVERSE_INDEX_TTL_MS = 8 * 24 * 60 * 60 * 1000; // 8 days
 
+  /**
+   * Cache of channel IDs known to be external/shared (Slack Connect).
+   * Populated from `is_ext_shared_channel` in incoming webhook payloads.
+   */
+  private readonly _externalChannels = new Set<string>();
+
   // Multi-workspace support
   private readonly clientId: string | undefined;
   private readonly clientSecret: string | undefined;
@@ -383,6 +392,7 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
   private readonly requestContext = new AsyncLocalStorage<{
     token: string;
     botUserId?: string;
+    isExtSharedChannel?: boolean;
   }>();
 
   /** Bot user ID (e.g., U_BOT_123) used for mention detection */
@@ -897,6 +907,19 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
   ): void {
     if (payload.type === "event_callback" && payload.event) {
       const event = payload.event;
+
+      // Track external/shared channel status from payload-level flag
+      if (payload.is_ext_shared_channel) {
+        let channelId: string | undefined;
+        if ("channel" in event) {
+          channelId = (event as SlackEvent).channel;
+        } else if ("item" in event) {
+          channelId = (event as SlackReactionEvent).item.channel;
+        }
+        if (channelId) {
+          this._externalChannels.add(channelId);
+        }
+      }
 
       if (event.type === "message" || event.type === "app_mention") {
         const slackEvent = event as SlackEvent;
@@ -3256,17 +3279,39 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
       const result = await this.client.conversations.info(
         this.withToken({ channel })
       );
-      const channelInfo = result.channel as { name?: string } | undefined;
+      const channelInfo = result.channel as
+        | {
+            name?: string;
+            is_ext_shared?: boolean;
+            is_private?: boolean;
+          }
+        | undefined;
+
+      // Update external channel cache from API response
+      if (channelInfo?.is_ext_shared) {
+        this._externalChannels.add(channel);
+      }
 
       this.logger.debug("Slack API: conversations.info response", {
         channelName: channelInfo?.name,
         ok: result.ok,
       });
 
+      // Determine channel visibility
+      let channelVisibility: ChannelVisibility = "unknown";
+      if (channelInfo?.is_ext_shared) {
+        channelVisibility = "external";
+      } else if (channelInfo?.is_private || channel.startsWith("D")) {
+        channelVisibility = "private";
+      } else if (channel.startsWith("C")) {
+        channelVisibility = "workspace";
+      }
+
       return {
         id: threadId,
         channelId: channel,
         channelName: channelInfo?.name,
+        channelVisibility,
         metadata: {
           threadTs,
           channel: result.channel,
@@ -3320,6 +3365,35 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
   isDM(threadId: string): boolean {
     const { channel } = this.decodeThreadId(threadId);
     return channel.startsWith("D");
+  }
+
+  /**
+   * Get the visibility scope of a channel containing the thread.
+   *
+   * - `external`: Slack Connect channel shared with external organizations
+   * - `private`: Private channel (starts with G) or DM (starts with D)
+   * - `workspace`: Public channel visible to all workspace members
+   * - `unknown`: Visibility cannot be determined (not yet cached)
+   */
+  getChannelVisibility(threadId: string): ChannelVisibility {
+    const { channel } = this.decodeThreadId(threadId);
+
+    // Check for external channel first (Slack Connect)
+    if (this._externalChannels.has(channel)) {
+      return "external";
+    }
+
+    // Private channels start with G, DMs start with D
+    if (channel.startsWith("G") || channel.startsWith("D")) {
+      return "private";
+    }
+
+    // Public channels start with C
+    if (channel.startsWith("C")) {
+      return "workspace";
+    }
+
+    return "unknown";
   }
 
   decodeThreadId(threadId: string): SlackThreadId {
@@ -3634,15 +3708,38 @@ export class SlackAdapter implements Adapter<SlackThreadId, unknown> {
         name?: string;
         is_im?: boolean;
         is_mpim?: boolean;
+        is_private?: boolean;
+        is_ext_shared?: boolean;
         num_members?: number;
         purpose?: { value?: string };
         topic?: { value?: string };
       };
 
+      // Update external channel cache from API response
+      if (info?.is_ext_shared) {
+        this._externalChannels.add(channel);
+      }
+
+      // Determine channel visibility
+      let channelVisibility: ChannelVisibility = "unknown";
+      if (info?.is_ext_shared) {
+        channelVisibility = "external";
+      } else if (
+        info?.is_im ||
+        info?.is_mpim ||
+        info?.is_private ||
+        channel.startsWith("D")
+      ) {
+        channelVisibility = "private";
+      } else if (channel.startsWith("C")) {
+        channelVisibility = "workspace";
+      }
+
       return {
         id: channelId,
         name: info?.name ? `#${info.name}` : undefined,
         isDM: Boolean(info?.is_im || info?.is_mpim),
+        channelVisibility,
         memberCount: info?.num_members,
         metadata: {
           purpose: info?.purpose?.value,

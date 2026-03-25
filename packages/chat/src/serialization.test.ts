@@ -30,6 +30,7 @@ describe("Serialization", () => {
         _type: "chat:Thread",
         id: "slack:C123:1234.5678",
         channelId: "C123",
+        channelVisibility: "unknown",
         currentMessage: undefined,
         isDM: false,
         adapterName: "slack",
@@ -52,6 +53,59 @@ describe("Serialization", () => {
 
       expect(json._type).toBe("chat:Thread");
       expect(json.isDM).toBe(true);
+    });
+
+    it("should serialize external channel thread correctly", () => {
+      const mockAdapter = createMockAdapter("slack");
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        channelVisibility: "external",
+      });
+
+      const json = thread.toJSON();
+
+      expect(json._type).toBe("chat:Thread");
+      expect(json.channelVisibility).toBe("external");
+    });
+
+    it("should serialize private channel thread correctly", () => {
+      const mockAdapter = createMockAdapter("slack");
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        channelVisibility: "private",
+      });
+
+      const json = thread.toJSON();
+
+      expect(json._type).toBe("chat:Thread");
+      expect(json.channelVisibility).toBe("private");
+    });
+
+    it("should serialize workspace channel thread correctly", () => {
+      const mockAdapter = createMockAdapter("slack");
+      const mockState = createMockState();
+
+      const thread = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        channelVisibility: "workspace",
+      });
+
+      const json = thread.toJSON();
+
+      expect(json.channelVisibility).toBe("workspace");
     });
 
     it("should produce JSON-serializable output", () => {
@@ -161,6 +215,37 @@ describe("Serialization", () => {
       expect(restored.channelId).toBe(original.channelId);
       expect(restored.isDM).toBe(original.isDM);
       expect(restored.adapter.name).toBe(original.adapter.name);
+    });
+
+    it("should round-trip channelVisibility correctly", () => {
+      const mockAdapter = createMockAdapter("slack");
+
+      const original = new ThreadImpl({
+        id: "slack:C123:1234.5678",
+        adapter: mockAdapter,
+        channelId: "C123",
+        stateAdapter: mockState,
+        channelVisibility: "external",
+      });
+
+      const json = original.toJSON();
+      const restored = ThreadImpl.fromJSON(json);
+
+      expect(restored.channelVisibility).toBe("external");
+    });
+
+    it("should default channelVisibility to unknown when missing from JSON", () => {
+      const json: SerializedThread = {
+        _type: "chat:Thread",
+        id: "slack:C123:1234.5678",
+        channelId: "C123",
+        isDM: false,
+        adapterName: "slack",
+      };
+
+      const thread = ThreadImpl.fromJSON(json);
+
+      expect(thread.channelVisibility).toBe("unknown");
     });
 
     it("should serialize currentMessage", () => {
@@ -730,6 +815,7 @@ describe("Serialization", () => {
           _type: "chat:Thread",
           id: "slack:C123:1234.5678",
           channelId: "C123",
+          channelVisibility: "unknown",
           currentMessage: undefined,
           isDM: false,
           adapterName: "slack",

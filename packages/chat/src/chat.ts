@@ -2085,6 +2085,10 @@ export class Chat<
     // Check if this is a DM
     const isDM = adapter.isDM?.(threadId) ?? false;
 
+    // Get channel visibility
+    const channelVisibility =
+      adapter.getChannelVisibility?.(threadId) ?? "unknown";
+
     return new ThreadImpl<TState>({
       id: threadId,
       adapter,
@@ -2093,6 +2097,7 @@ export class Chat<
       initialMessage,
       isSubscribedContext,
       isDM,
+      channelVisibility,
       currentMessage: initialMessage,
       logger: this.logger,
       streamingUpdateIntervalMs: this._streamingUpdateIntervalMs,

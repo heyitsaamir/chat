@@ -271,6 +271,7 @@ export type {
   Author,
   Channel,
   ChannelInfo,
+  ChannelVisibility,
   ChatConfig,
   ChatInstance,
   ConcurrencyConfig,

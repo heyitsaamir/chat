@@ -18,6 +18,7 @@ import type {
   Author,
   Channel,
   ChannelInfo,
+  ChannelVisibility,
   EphemeralMessage,
   PostableMessage,
   PostEphemeralOptions,
@@ -37,6 +38,7 @@ const CHANNEL_STATE_KEY_PREFIX = "channel-state:";
 export interface SerializedChannel {
   _type: "chat:Channel";
   adapterName: string;
+  channelVisibility?: ChannelVisibility;
   id: string;
   isDM: boolean;
 }
@@ -46,6 +48,7 @@ export interface SerializedChannel {
  */
 interface ChannelImplConfigWithAdapter {
   adapter: Adapter;
+  channelVisibility?: ChannelVisibility;
   id: string;
   isDM?: boolean;
   messageHistory?: MessageHistoryCache;
@@ -57,6 +60,7 @@ interface ChannelImplConfigWithAdapter {
  */
 interface ChannelImplConfigLazy {
   adapterName: string;
+  channelVisibility?: ChannelVisibility;
   id: string;
   isDM?: boolean;
 }
@@ -83,6 +87,7 @@ export class ChannelImpl<TState = Record<string, unknown>>
 {
   readonly id: string;
   readonly isDM: boolean;
+  readonly channelVisibility: ChannelVisibility;
 
   private _adapter?: Adapter;
   private readonly _adapterName?: string;
@@ -93,6 +98,7 @@ export class ChannelImpl<TState = Record<string, unknown>>
   constructor(config: ChannelImplConfig) {
     this.id = config.id;
     this.isDM = config.isDM ?? false;
+    this.channelVisibility = config.channelVisibility ?? "unknown";
 
     if (isLazyConfig(config)) {
       this._adapterName = config.adapterName;
@@ -387,6 +393,7 @@ export class ChannelImpl<TState = Record<string, unknown>>
       _type: "chat:Channel",
       id: this.id,
       adapterName: this.adapter.name,
+      channelVisibility: this.channelVisibility,
       isDM: this.isDM,
     };
   }
@@ -398,6 +405,7 @@ export class ChannelImpl<TState = Record<string, unknown>>
     const channel = new ChannelImpl<TState>({
       id: json.id,
       adapterName: json.adapterName,
+      channelVisibility: json.channelVisibility,
       isDM: json.isDM,
     });
     if (adapter) {
