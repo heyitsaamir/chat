@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@chat-adapter/teams)](https://www.npmjs.com/package/@chat-adapter/teams)
 [![npm downloads](https://img.shields.io/npm/dm/@chat-adapter/teams)](https://www.npmjs.com/package/@chat-adapter/teams)
 
-Microsoft Teams adapter for [Chat SDK](https://chat-sdk.dev), powered by [@microsoft/teams.apps](https://www.npmjs.com/package/@microsoft/teams.apps).
+Microsoft Teams adapter for [Chat SDK](https://chat-sdk.dev). Configure with Azure Bot Service.
 
 ## Installation
 
@@ -13,7 +13,7 @@ pnpm add @chat-adapter/teams
 
 ## Usage
 
-The adapter auto-detects `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` from environment variables:
+The adapter auto-detects `TEAMS_APP_ID`, `TEAMS_APP_PASSWORD`, and `TEAMS_APP_TENANT_ID` from environment variables:
 
 ```typescript
 import { Chat } from "chat";
@@ -22,7 +22,9 @@ import { createTeamsAdapter } from "@chat-adapter/teams";
 const bot = new Chat({
   userName: "mybot",
   adapters: {
-    teams: createTeamsAdapter(),
+    teams: createTeamsAdapter({
+      appType: "SingleTenant",
+    }),
   },
 });
 
@@ -43,18 +45,19 @@ bot.onNewMention(async (thread, message) => {
    - **Subscription**: Your Azure subscription
    - **Resource group**: Create new or use existing
    - **Pricing tier**: F0 (free) for testing
+   - **Type of App**: **Single Tenant** (recommended for enterprise)
    - **Creation type**: **Create new Microsoft App ID**
 5. Click **Review + create** then **Create**
 
 ### 2. Get app credentials
 
 1. Go to your Bot resource then **Configuration**
-2. Copy **Microsoft App ID** as `CLIENT_ID`
+2. Copy **Microsoft App ID** as `TEAMS_APP_ID`
 3. Click **Manage Password** (next to Microsoft App ID)
 4. In the App Registration page, go to **Certificates & secrets**
 5. Click **New client secret**, add description, select expiry, click **Add**
-6. Copy the **Value** immediately (shown only once) as `CLIENT_SECRET`
-7. Go to **Overview** and copy **Directory (tenant) ID** as `TENANT_ID`
+6. Copy the **Value** immediately (shown only once) as `TEAMS_APP_PASSWORD`
+7. Go to **Overview** and copy **Directory (tenant) ID** as `TEAMS_APP_TENANT_ID`
 
 ### 3. Configure messaging endpoint
 
@@ -131,70 +134,79 @@ Create icon files (32x32 `outline.png` and 192x192 `color.png`), then zip all th
 
 ## Configuration
 
-The config extends `AppOptions` from `@microsoft/teams.apps`. All options are auto-detected from environment variables when not provided.
+All options are auto-detected from environment variables when not provided.
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `clientId` | No* | Azure Bot App ID. Auto-detected from `CLIENT_ID` |
-| `clientSecret` | No** | Azure Bot App Secret. Auto-detected from `CLIENT_SECRET` |
-| `tenantId` | No | Azure AD Tenant ID. Auto-detected from `TENANT_ID` |
-| `token` | No** | Custom token provider function |
-| `managedIdentityClientId` | No** | Managed identity client ID or `"system"` |
-| `serviceUrl` | No | Override Bot Framework service URL. Auto-detected from `SERVICE_URL` |
-| `userName` | No | Bot display name (default: `"bot"`) |
+| `appId` | No* | Azure Bot App ID. Auto-detected from `TEAMS_APP_ID` |
+| `appPassword` | No** | Azure Bot App Password. Auto-detected from `TEAMS_APP_PASSWORD` |
+| `certificate` | No** | Certificate-based authentication config |
+| `federated` | No** | Federated (workload identity) authentication config |
+| `appType` | No | `"MultiTenant"` or `"SingleTenant"` (default: `"MultiTenant"`) |
+| `appTenantId` | For SingleTenant | Azure AD Tenant ID. Auto-detected from `TEAMS_APP_TENANT_ID` |
 | `logger` | No | Logger instance (defaults to `ConsoleLogger("info")`) |
 
-\*`clientId` is required — either via config or `CLIENT_ID` env var.
+\*`appId` is required — either via config or `TEAMS_APP_ID` env var.
 
-\*\*At least one authentication method is required: `clientSecret`, `token`, or `managedIdentityClientId`. When none is provided, `CLIENT_SECRET` is auto-detected from environment.
+\*\*Exactly one authentication method is required: `appPassword`, `certificate`, or `federated`.
 
 ### Authentication methods
 
+The adapter supports three mutually exclusive authentication methods. When no explicit auth is provided, `TEAMS_APP_PASSWORD` is auto-detected from environment variables.
+
 #### Client secret (default)
 
-The simplest option — provide `clientSecret` directly or set `CLIENT_SECRET`:
+The simplest option — provide `appPassword` directly or set `TEAMS_APP_PASSWORD`:
 
 ```typescript
 createTeamsAdapter({
-  clientSecret: "your_app_secret_here",
+  appPassword: "your_app_password_here",
 });
 ```
 
-#### Custom token provider
+#### Certificate
 
-Provide a function that returns tokens:
+Authenticate with a PEM certificate. Provide either `certificateThumbprint` or `x5c` (public certificate for subject-name validation):
 
 ```typescript
 createTeamsAdapter({
-  token: async (scope, tenantId) => {
-    return await getTokenFromVault(scope);
+  certificate: {
+    certificatePrivateKey: "-----BEGIN RSA PRIVATE KEY-----\n...",
+    certificateThumbprint: "AB1234...", // hex-encoded thumbprint
   },
 });
 ```
 
-#### Managed identity
-
-For Azure-hosted environments with managed identities:
+Or with subject-name validation:
 
 ```typescript
-// System-assigned managed identity
 createTeamsAdapter({
-  managedIdentityClientId: "system",
+  certificate: {
+    certificatePrivateKey: "-----BEGIN RSA PRIVATE KEY-----\n...",
+    x5c: "-----BEGIN CERTIFICATE-----\n...",
+  },
 });
+```
 
-// User-assigned managed identity
+#### Federated (workload identity)
+
+For environments with managed identities (e.g. Azure Kubernetes Service, GitHub Actions):
+
+```typescript
 createTeamsAdapter({
-  managedIdentityClientId: "your_managed_identity_client_id",
+  federated: {
+    clientId: "your_managed_identity_client_id_here",
+    clientAudience: "api://AzureADTokenExchange", // optional, this is the default
+  },
 });
 ```
 
 ## Environment variables
 
 ```bash
-CLIENT_ID=...
-CLIENT_SECRET=...
-TENANT_ID=...       # Required for single-tenant apps
-SERVICE_URL=...     # Optional: override Bot Framework service URL
+TEAMS_APP_ID=...
+TEAMS_APP_PASSWORD=...
+TEAMS_APP_TENANT_ID=...  # Required for SingleTenant
 ```
 
 ## Features
@@ -207,7 +219,7 @@ SERVICE_URL=...     # Optional: override Bot Framework service URL
 | Edit message | Yes |
 | Delete message | Yes |
 | File uploads | Yes |
-| Streaming | Post+Edit (native HttpStream when SDK exports it) |
+| Streaming | Post+Edit fallback |
 
 ### Rich content
 
@@ -220,7 +232,7 @@ SERVICE_URL=...     # Optional: override Bot Framework service URL
 | Tables | GFM |
 | Fields | Yes |
 | Images in cards | Yes |
-| Modals | Not yet (planned) |
+| Modals | No |
 
 ### Conversations
 
@@ -228,10 +240,9 @@ SERVICE_URL=...     # Optional: override Bot Framework service URL
 |---------|-----------|
 | Slash commands | No |
 | Mentions | Yes |
-| Add reactions | Yes |
-| Remove reactions | Yes |
-| Receive reactions | Yes |
-| Typing indicator | Yes |
+| Add reactions | No |
+| Remove reactions | No |
+| Typing indicator | No |
 | DMs | Yes |
 | Ephemeral messages | No (DM fallback) |
 
@@ -239,25 +250,30 @@ SERVICE_URL=...     # Optional: override Bot Framework service URL
 
 | Feature | Supported |
 |---------|-----------|
-| Fetch messages | Yes (requires Graph permissions) |
+| Fetch messages | Yes |
 | Fetch single message | No |
 | Fetch thread info | Yes |
-| Fetch channel messages | Yes (requires Graph permissions) |
-| List threads | Yes (requires Graph permissions) |
-| Fetch channel info | Yes (requires Graph permissions) |
+| Fetch channel messages | Yes |
+| List threads | Yes |
+| Fetch channel info | Yes |
 | Post channel message | Yes |
 
-## Message history (`fetchMessages`)
+## Limitations
 
-Fetching message history requires the Microsoft Graph API. The adapter uses `@microsoft/teams.graph-endpoints` for typed Graph calls. To enable it:
+- **Adding reactions**: Teams Bot Framework doesn't support bots adding reactions. Calling `addReaction()` or `removeReaction()` throws a `NotImplementedError`. The bot can still receive reaction events via `onReaction()`.
+- **Typing indicators**: Not available via Bot Framework. `startTyping()` is a no-op.
 
-1. Set `tenantId` in the adapter config (or `TENANT_ID` env var)
+### Message history (`fetchMessages`)
+
+Fetching message history requires the Microsoft Graph API with client credentials flow. To enable it:
+
+1. Set `appTenantId` in the adapter config
 2. Grant one of these Azure AD app permissions:
+   - `ChatMessage.Read.Chat`
    - `Chat.Read.All`
-   - `ChannelMessage.Read.All`
-3. Grant admin consent in the Azure portal
+   - `Chat.Read.WhereInstalled`
 
-Without these permissions, `fetchMessages` will throw a `NotImplementedError`.
+Without these permissions, `fetchMessages` will not be able to retrieve channel history.
 
 ### Receiving all messages
 
@@ -284,10 +300,11 @@ Alternatively, configure the bot in Azure to receive all messages.
 
 ### "Unauthorized" error
 
-- Verify `CLIENT_ID` and your chosen auth credential are correct
-- For client secret auth, check that `CLIENT_SECRET` is valid and not expired
-- For managed identity, verify the client ID and that federated credentials are configured
-- Ensure `TENANT_ID` is set for single-tenant apps
+- Verify `TEAMS_APP_ID` and your chosen auth credential are correct
+- For client secret auth, check that `TEAMS_APP_PASSWORD` is valid
+- For certificate auth, ensure the private key and thumbprint/x5c match what's registered in Azure AD
+- For federated auth, verify the managed identity client ID and audience are correct
+- For SingleTenant apps, ensure `TEAMS_APP_TENANT_ID` is set
 - Check that the messaging endpoint URL is correct in Azure
 
 ### Bot not appearing in Teams
