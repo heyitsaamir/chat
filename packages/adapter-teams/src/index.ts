@@ -11,7 +11,6 @@ import type {
   IAdaptiveCardActionInvokeActivity,
   IMessageActivity,
   IMessageReactionActivity,
-  MessageReactionType,
 } from "@microsoft/teams.api";
 import { MessageActivity, TypingActivity } from "@microsoft/teams.api";
 import type { IActivityContext } from "@microsoft/teams.apps";
@@ -43,6 +42,7 @@ import {
   convertEmojiPlaceholders,
   defaultEmojiResolver,
   Message,
+  NotImplementedError,
 } from "chat";
 import { BridgeHttpAdapter } from "./bridge-adapter";
 import { cardToAdaptiveCard } from "./cards";
@@ -719,63 +719,25 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   }
 
   async addReaction(
-    threadId: string,
-    messageId: string,
-    emoji: EmojiValue | string
+    _threadId: string,
+    _messageId: string,
+    _emoji: EmojiValue | string
   ): Promise<void> {
-    const { conversationId } = this.decodeThreadId(threadId);
-    const reactionType = typeof emoji === "string" ? emoji : emoji.name;
-
-    this.logger.debug("Teams API: addReaction", {
-      conversationId,
-      messageId,
-      reactionType,
-    });
-
-    try {
-      await this.app.api.reactions.add(
-        conversationId,
-        messageId,
-        reactionType as MessageReactionType
-      );
-    } catch (error) {
-      this.logger.error("Teams API: addReaction failed", {
-        conversationId,
-        messageId,
-        error,
-      });
-      handleTeamsError(error, "addReaction");
-    }
+    throw new NotImplementedError(
+      "teams",
+      "addReaction is not yet supported by the Teams SDK"
+    );
   }
 
   async removeReaction(
-    threadId: string,
-    messageId: string,
-    emoji: EmojiValue | string
+    _threadId: string,
+    _messageId: string,
+    _emoji: EmojiValue | string
   ): Promise<void> {
-    const { conversationId } = this.decodeThreadId(threadId);
-    const reactionType = typeof emoji === "string" ? emoji : emoji.name;
-
-    this.logger.debug("Teams API: removeReaction", {
-      conversationId,
-      messageId,
-      reactionType,
-    });
-
-    try {
-      await this.app.api.reactions.remove(
-        conversationId,
-        messageId,
-        reactionType as MessageReactionType
-      );
-    } catch (error) {
-      this.logger.error("Teams API: removeReaction failed", {
-        conversationId,
-        messageId,
-        error,
-      });
-      handleTeamsError(error, "removeReaction");
-    }
+    throw new NotImplementedError(
+      "teams",
+      "removeReaction is not yet supported by the Teams SDK"
+    );
   }
 
   async startTyping(threadId: string, _status?: string): Promise<void> {
