@@ -14,10 +14,7 @@ import type {
   MessageReactionType,
 } from "@microsoft/teams.api";
 import { MessageActivity, TypingActivity } from "@microsoft/teams.api";
-import type {
-  IActivityContext,
-  IHttpServerRequest,
-} from "@microsoft/teams.apps";
+import type { IActivityContext } from "@microsoft/teams.apps";
 import { App } from "@microsoft/teams.apps";
 import type {
   ActionEvent,
@@ -76,8 +73,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   private readonly config: TeamsAdapterConfig;
   private readonly graphReader: TeamsGraphReader;
 
-  /** Request-scoped webhook options for passing waitUntil to handlers */
-  private currentWebhookOptions: WebhookOptions | undefined;
 
   constructor(config: TeamsAdapterConfig = {}) {
     this.config = config;
@@ -85,7 +80,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     this.userName = config.userName || "bot";
 
     // Create the BridgeHttpAdapter for serverless dispatch
-    this.bridgeAdapter = new BridgeHttpAdapter();
+    this.bridgeAdapter = new BridgeHttpAdapter(this.logger);
 
     // Convert our public config (appId/appPassword/appTenantId) to Teams SDK AppOptions
     this.app = new App({
@@ -241,7 +236,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       this,
       threadId,
       message,
-      this.currentWebhookOptions
+      this.bridgeAdapter.getWebhookOptions(activity.id)
     );
   }
 
@@ -286,7 +281,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       threadId,
     });
 
-    this.chat.processAction(actionEvent, this.currentWebhookOptions);
+    this.chat.processAction(actionEvent, this.bridgeAdapter.getWebhookOptions(activity.id));
   }
 
   /**
@@ -342,7 +337,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       threadId,
     });
 
-    this.chat.processAction(actionEvent, this.currentWebhookOptions);
+    this.chat.processAction(actionEvent, this.bridgeAdapter.getWebhookOptions(activity.id));
   }
 
   /**
@@ -396,7 +391,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
 
       this.chat.processReaction(
         { ...event, adapter: this },
-        this.currentWebhookOptions
+        this.bridgeAdapter.getWebhookOptions(activity.id)
       );
     }
 
@@ -423,7 +418,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
 
       this.chat.processReaction(
         { ...event, adapter: this },
-        this.currentWebhookOptions
+        this.bridgeAdapter.getWebhookOptions(activity.id)
       );
     }
   }
@@ -517,50 +512,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     request: Request,
     options?: WebhookOptions
   ): Promise<Response> {
-    const body = await request.text();
-    this.logger.debug("Teams webhook raw body", { body });
-
-    let parsedBody: unknown;
-    try {
-      parsedBody = JSON.parse(body);
-    } catch (e) {
-      this.logger.error("Failed to parse request body", { error: e });
-      return new Response("Invalid JSON", { status: 400 });
-    }
-
-    // Build IHttpServerRequest for the bridge adapter
-    const headers: Record<string, string> = {};
-    request.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
-
-    const serverRequest: IHttpServerRequest = {
-      body: parsedBody,
-      headers,
-    };
-
-    // Store webhook options for handler access
-    this.currentWebhookOptions = options;
-
-    try {
-      const serverResponse = await this.bridgeAdapter.dispatch(serverRequest);
-
-      return new Response(
-        serverResponse.body ? JSON.stringify(serverResponse.body) : "{}",
-        {
-          status: serverResponse.status,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
-    } catch (error) {
-      this.logger.error("Bridge adapter dispatch error", { error });
-      return new Response(JSON.stringify({ error: "Internal error" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
-    } finally {
-      this.currentWebhookOptions = undefined;
-    }
+    return this.bridgeAdapter.dispatch(request, options);
   }
 
   async postMessage(

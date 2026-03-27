@@ -227,15 +227,28 @@ export function injectMockTeamsApp(
   };
 
   // Create a mock bridge adapter that dispatches activities through the handlers
+  const webhookOptionsMap = new Map<string, unknown>();
   adapterInternal.bridgeAdapter = {
+    getWebhookOptions: (activityId: string | undefined) =>
+      activityId ? webhookOptionsMap.get(activityId) : undefined,
     dispatch: vi.fn(
-      async (request: { body: unknown; headers: Record<string, string> }) => {
-        const activity = request.body as {
+      async (
+        request: Request,
+        options?: { waitUntil?: (promise: Promise<unknown>) => void }
+      ) => {
+        const body = await request.text();
+        const parsed = JSON.parse(body);
+        const activity = parsed as {
+          id?: string;
           type: string;
           text?: string;
           from?: { id: string };
           value?: unknown;
         };
+
+        if (activity.id && options) {
+          webhookOptionsMap.set(activity.id, options);
+        }
 
         // For message activities, simulate the TeamsSDK pipeline
         // by calling the adapter's internal methods
@@ -278,7 +291,14 @@ export function injectMockTeamsApp(
           }
         }
 
-        return { status: 200, body: {} };
+        if (activity.id) {
+          webhookOptionsMap.delete(activity.id);
+        }
+
+        return new Response("{}", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
     ),
   };
