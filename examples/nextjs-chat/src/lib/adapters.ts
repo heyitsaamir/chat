@@ -151,10 +151,11 @@ export function buildAdapters(): Adapters {
     );
   }
 
-  // Teams adapter (optional) - env vars: CLIENT_ID or TEAMS_APP_ID
-  if (process.env.CLIENT_ID || process.env.TEAMS_APP_ID) {
+  // Teams adapter (optional) - env vars: TEAMS_APP_ID, TEAMS_APP_PASSWORD
+  if (process.env.TEAMS_APP_ID) {
     adapters.teams = withRecording(
       createTeamsAdapter({
+        appType: "SingleTenant",
         userName: "Chat SDK Demo",
         logger: logger.child("teams"),
       }),

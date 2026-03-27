@@ -17,19 +17,16 @@ export function toAppOptions(
     );
   }
 
-  const clientId =
-    config.appId ?? process.env.CLIENT_ID ?? process.env.TEAMS_APP_ID;
+  const clientId = config.appId ?? process.env.TEAMS_APP_ID;
   const clientSecret = config.federated
     ? undefined
-    : (config.appPassword ??
-       process.env.CLIENT_SECRET ?? process.env.TEAMS_APP_PASSWORD);
+    : (config.appPassword ?? process.env.TEAMS_APP_PASSWORD);
 
   // For SingleTenant, tenantId is required. For MultiTenant, omit it.
   const tenantId =
     config.appType === "MultiTenant"
       ? undefined
-      : (config.appTenantId ??
-         process.env.TENANT_ID ?? process.env.TEAMS_APP_TENANT_ID);
+      : (config.appTenantId ?? process.env.TEAMS_APP_TENANT_ID);
 
   if (config.federated?.clientAudience) {
     config.logger?.warn(

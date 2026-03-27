@@ -18,11 +18,11 @@ export interface TeamsAuthFederated {
 }
 
 export interface TeamsAdapterConfig {
-  /** Microsoft App ID. Defaults to CLIENT_ID or TEAMS_APP_ID env var. */
+  /** Microsoft App ID. Defaults to TEAMS_APP_ID env var. */
   appId?: string;
-  /** Microsoft App Password. Defaults to CLIENT_SECRET or TEAMS_APP_PASSWORD env var. */
+  /** Microsoft App Password. Defaults to TEAMS_APP_PASSWORD env var. */
   appPassword?: string;
-  /** Microsoft App Tenant ID. Defaults to TENANT_ID or TEAMS_APP_TENANT_ID env var. */
+  /** Microsoft App Tenant ID. Defaults to TEAMS_APP_TENANT_ID env var. */
   appTenantId?: string;
   /** Microsoft App Type */
   appType?: "MultiTenant" | "SingleTenant";
