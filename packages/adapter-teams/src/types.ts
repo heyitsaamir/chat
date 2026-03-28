@@ -47,5 +47,4 @@ export interface TeamsThreadId {
 export interface TeamsChannelContext {
   channelId: string;
   teamId: string;
-  tenantId: string;
 }

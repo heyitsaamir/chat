@@ -59,6 +59,7 @@ import type {
 
 const MESSAGEID_CAPTURE_PATTERN = /messageid=(\d+)/;
 const MESSAGEID_STRIP_PATTERN = /;messageid=\d+/;
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   readonly name = "teams";
@@ -92,8 +93,9 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       botId: this.app.id ?? "",
       graph: this.app.graph,
       logger: this.logger,
-      getChat: () => this.chat,
       formatConverter: this.formatConverter,
+      getChannelContext: (baseConversationId) =>
+        this.getChannelContext(baseConversationId),
     });
   }
 
@@ -141,30 +143,25 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     }
 
     const userId = activity.from.id;
-    const ttl = 30 * 24 * 60 * 60 * 1000; // 30 days
+    const ttl = CACHE_TTL_MS;
 
     // Cache serviceUrl for DM creation
     if (activity.serviceUrl) {
       this.chat
         .getState()
         .set(`teams:serviceUrl:${userId}`, activity.serviceUrl, ttl)
-        .catch(() => {});
+        .catch(() => { });
     }
 
-    const channelData = activity.channelData as
-      | {
-          tenant?: { id?: string };
-          team?: { id?: string; aadGroupId?: string };
-          channel?: { id?: string };
-        }
-      | undefined;
-    const tenantId = channelData?.tenant?.id;
+    const channelData = activity.channelData;
+    const tenantId =
+      activity.conversation?.tenantId ?? channelData?.tenant?.id;
 
     if (tenantId) {
       this.chat
         .getState()
         .set(`teams:tenantId:${userId}`, tenantId, ttl)
-        .catch(() => {});
+        .catch(() => { });
     }
 
     // Cache channel context for Graph API message fetching
@@ -172,11 +169,10 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
     const conversationId = activity.conversation?.id || "";
     const baseChannelId = conversationId.replace(MESSAGEID_STRIP_PATTERN, "");
 
-    if (teamAadGroupId && channelData?.channel?.id && tenantId) {
+    if (teamAadGroupId && channelData?.channel?.id) {
       const context: TeamsChannelContext = {
         teamId: teamAadGroupId,
         channelId: channelData.channel.id,
-        tenantId,
       };
       this.chat
         .getState()
@@ -185,8 +181,58 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           JSON.stringify(context),
           ttl
         )
-        .catch(() => {});
+        .catch(() => { });
     }
+  }
+
+  /**
+   * Look up cached channel context, resolving aadGroupId via Bot API if needed.
+   */
+  private async getChannelContext(
+    baseConversationId: string
+  ): Promise<TeamsChannelContext | null> {
+    if (!this.chat) return null;
+
+    const cached = await this.chat
+      .getState()
+      .get<string>(`teams:channelContext:${baseConversationId}`);
+    if (cached) {
+      try {
+        return JSON.parse(cached) as TeamsChannelContext;
+      } catch {
+        return null;
+      }
+    }
+
+    // No cached context — try to resolve aadGroupId from the conversation ID
+    if (
+      !baseConversationId.startsWith("19:") ||
+      !baseConversationId.includes("@thread")
+    ) {
+      return null;
+    }
+
+    try {
+      const details = await this.app.api.teams.getById(baseConversationId);
+      if (details.aadGroupId) {
+        const context: TeamsChannelContext = {
+          teamId: details.aadGroupId,
+          channelId: baseConversationId,
+        };
+        await this.chat
+          .getState()
+          .set(
+            `teams:channelContext:${baseConversationId}`,
+            JSON.stringify(context),
+            CACHE_TTL_MS
+          );
+        return context;
+      }
+    } catch {
+      // Resolution failed
+    }
+
+    return null;
   }
 
   /**
@@ -484,16 +530,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       mimeType: att.contentType,
       fetchData: url
         ? async () => {
-            const response = await fetch(url);
-            if (!response.ok) {
-              throw new NetworkError(
-                "teams",
-                `Failed to fetch file: ${response.status} ${response.statusText}`
-              );
-            }
-            const arrayBuffer = await response.arrayBuffer();
-            return Buffer.from(arrayBuffer);
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new NetworkError(
+              "teams",
+              `Failed to fetch file: ${response.status} ${response.statusText}`
+            );
           }
+          const arrayBuffer = await response.arrayBuffer();
+          return Buffer.from(arrayBuffer);
+        }
         : undefined,
     };
   }

@@ -9,7 +9,7 @@ function createTestReader(): TeamsGraphReader {
     botId: "test-app",
     graph: new GraphClient(),
     formatConverter: new TeamsFormatConverter(),
-    getChat: () => null,
+    getChannelContext: async () => null,
     logger: new ConsoleLogger("error"),
   });
 }

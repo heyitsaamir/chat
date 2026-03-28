@@ -4,7 +4,6 @@ import { chats, teams } from "@microsoft/teams.graph-endpoints";
 import type {
   Attachment,
   ChannelInfo,
-  ChatInstance,
   FetchOptions,
   FetchResult,
   ListThreadsOptions,
@@ -35,7 +34,7 @@ export interface TeamsGraphReaderDeps {
   botId: string;
   graph: GraphClient;
   formatConverter: TeamsFormatConverter;
-  getChat: () => ChatInstance | null;
+  getChannelContext: (baseConversationId: string) => Promise<TeamsChannelContext | null>;
   logger: Logger;
 }
 
@@ -64,20 +63,9 @@ export class TeamsGraphReader {
       ""
     );
 
-    const chat = this.deps.getChat();
-    let channelContext: TeamsChannelContext | null = null;
-    if (threadMessageId && chat) {
-      const cachedContext = await chat
-        .getState()
-        .get<string>(`teams:channelContext:${baseConversationId}`);
-      if (cachedContext) {
-        try {
-          channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
-        } catch {
-          // Invalid cached data
-        }
-      }
-    }
+    const channelContext = threadMessageId
+      ? await this.deps.getChannelContext(baseConversationId)
+      : null;
 
     try {
       this.deps.logger.debug("Teams Graph API: fetching messages", {
@@ -207,20 +195,7 @@ export class TeamsGraphReader {
     const direction = options.direction ?? "backward";
 
     try {
-      let channelContext: TeamsChannelContext | null = null;
-      const chat = this.deps.getChat();
-      if (chat) {
-        const cachedContext = await chat
-          .getState()
-          .get<string>(`teams:channelContext:${baseConversationId}`);
-        if (cachedContext) {
-          try {
-            channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
-          } catch {
-            // Ignore
-          }
-        }
-      }
+      const channelContext = await this.deps.getChannelContext(baseConversationId);
 
       this.deps.logger.debug("Teams Graph API: fetchChannelMessages", {
         conversationId: baseConversationId,
@@ -361,20 +336,7 @@ export class TeamsGraphReader {
       ""
     );
 
-    let channelContext: TeamsChannelContext | null = null;
-    const chat = this.deps.getChat();
-    if (chat) {
-      const cachedContext = await chat
-        .getState()
-        .get<string>(`teams:channelContext:${baseConversationId}`);
-      if (cachedContext) {
-        try {
-          channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
-        } catch {
-          // Ignore
-        }
-      }
-    }
+    const channelContext = await this.deps.getChannelContext(baseConversationId);
 
     if (channelContext) {
       try {
@@ -437,20 +399,7 @@ export class TeamsGraphReader {
     const limit = options.limit || 50;
 
     try {
-      let channelContext: TeamsChannelContext | null = null;
-      const chat = this.deps.getChat();
-      if (chat) {
-        const cachedContext = await chat
-          .getState()
-          .get<string>(`teams:channelContext:${baseConversationId}`);
-        if (cachedContext) {
-          try {
-            channelContext = JSON.parse(cachedContext) as TeamsChannelContext;
-          } catch {
-            // Ignore
-          }
-        }
-      }
+      const channelContext = await this.deps.getChannelContext(baseConversationId);
 
       this.deps.logger.debug("Teams Graph API: listThreads", {
         conversationId: baseConversationId,

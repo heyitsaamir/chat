@@ -64,7 +64,6 @@ describe("fetchMessages Replay Tests - Teams", () => {
     const channelContext = {
       teamId: TEAMS_TEAM_ID,
       channelId: TEAMS_CHANNEL_ID,
-      tenantId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     };
     await ctx.chat
       .getState()
@@ -350,7 +349,6 @@ describe("allMessages Replay Tests - Teams", () => {
     const channelContext = {
       teamId: TEAMS_TEAM_ID,
       channelId: TEAMS_CHANNEL_ID,
-      tenantId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     };
     await ctx.chat
       .getState()
