@@ -32,9 +32,11 @@ type GraphMessage = NonNullable<ChatMessageListResponse["value"]>[number];
 
 export interface TeamsGraphReaderDeps {
   botId: string;
-  graph: GraphClient;
   formatConverter: TeamsFormatConverter;
-  getChannelContext: (baseConversationId: string) => Promise<TeamsChannelContext | null>;
+  getChannelContext: (
+    baseConversationId: string
+  ) => Promise<TeamsChannelContext | null>;
+  graph: GraphClient;
   logger: Logger;
 }
 
@@ -195,7 +197,8 @@ export class TeamsGraphReader {
     const direction = options.direction ?? "backward";
 
     try {
-      const channelContext = await this.deps.getChannelContext(baseConversationId);
+      const channelContext =
+        await this.deps.getChannelContext(baseConversationId);
 
       this.deps.logger.debug("Teams Graph API: fetchChannelMessages", {
         conversationId: baseConversationId,
@@ -336,7 +339,8 @@ export class TeamsGraphReader {
       ""
     );
 
-    const channelContext = await this.deps.getChannelContext(baseConversationId);
+    const channelContext =
+      await this.deps.getChannelContext(baseConversationId);
 
     if (channelContext) {
       try {
@@ -399,7 +403,8 @@ export class TeamsGraphReader {
     const limit = options.limit || 50;
 
     try {
-      const channelContext = await this.deps.getChannelContext(baseConversationId);
+      const channelContext =
+        await this.deps.getChannelContext(baseConversationId);
 
       this.deps.logger.debug("Teams Graph API: listThreads", {
         conversationId: baseConversationId,

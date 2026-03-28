@@ -214,8 +214,7 @@ export function injectMockTeamsApp(
   };
 
   // Replace the app with a mock that has the right API surface
-  const config = (adapter as unknown as { config: { appId?: string } })
-    .config;
+  const config = (adapter as unknown as { config: { appId?: string } }).config;
   adapterInternal.app = {
     id: config.appId || TEAMS_APP_ID,
     send: mockApp.send,

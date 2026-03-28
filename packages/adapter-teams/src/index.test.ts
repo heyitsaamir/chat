@@ -838,7 +838,9 @@ describe("TeamsAdapter", () => {
         serviceUrl: "https://smba.trafficmanager.net/teams/",
       });
 
-      const result = await adapter.postMessage(threadId, { markdown: "Hi there" });
+      const result = await adapter.postMessage(threadId, {
+        markdown: "Hi there",
+      });
 
       expect(result.id).toBe("sent-msg-123");
       expect(result.threadId).toBe(threadId);

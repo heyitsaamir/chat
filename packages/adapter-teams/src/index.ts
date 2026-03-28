@@ -74,7 +74,6 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   private readonly config: TeamsAdapterConfig;
   private readonly graphReader: TeamsGraphReader;
 
-
   constructor(config: TeamsAdapterConfig = {}) {
     this.config = config;
     this.logger = config.logger ?? new ConsoleLogger("info").child("teams");
@@ -150,18 +149,17 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       this.chat
         .getState()
         .set(`teams:serviceUrl:${userId}`, activity.serviceUrl, ttl)
-        .catch(() => { });
+        .catch(() => {});
     }
 
     const channelData = activity.channelData;
-    const tenantId =
-      activity.conversation?.tenantId ?? channelData?.tenant?.id;
+    const tenantId = activity.conversation?.tenantId ?? channelData?.tenant?.id;
 
     if (tenantId) {
       this.chat
         .getState()
         .set(`teams:tenantId:${userId}`, tenantId, ttl)
-        .catch(() => { });
+        .catch(() => {});
     }
 
     // Cache channel context for Graph API message fetching
@@ -181,7 +179,7 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
           JSON.stringify(context),
           ttl
         )
-        .catch(() => { });
+        .catch(() => {});
     }
   }
 
@@ -191,7 +189,9 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
   private async getChannelContext(
     baseConversationId: string
   ): Promise<TeamsChannelContext | null> {
-    if (!this.chat) return null;
+    if (!this.chat) {
+      return null;
+    }
 
     const cached = await this.chat
       .getState()
@@ -206,8 +206,10 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
 
     // No cached context — try to resolve aadGroupId from the conversation ID
     if (
-      !baseConversationId.startsWith("19:") ||
-      !baseConversationId.includes("@thread")
+      !(
+        baseConversationId.startsWith("19:") &&
+        baseConversationId.includes("@thread")
+      )
     ) {
       return null;
     }
@@ -327,7 +329,10 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       threadId,
     });
 
-    this.chat.processAction(actionEvent, this.bridgeAdapter.getWebhookOptions(activity.id));
+    this.chat.processAction(
+      actionEvent,
+      this.bridgeAdapter.getWebhookOptions(activity.id)
+    );
   }
 
   /**
@@ -383,7 +388,10 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       threadId,
     });
 
-    this.chat.processAction(actionEvent, this.bridgeAdapter.getWebhookOptions(activity.id));
+    this.chat.processAction(
+      actionEvent,
+      this.bridgeAdapter.getWebhookOptions(activity.id)
+    );
   }
 
   /**
@@ -530,16 +538,16 @@ export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
       mimeType: att.contentType,
       fetchData: url
         ? async () => {
-          const response = await fetch(url);
-          if (!response.ok) {
-            throw new NetworkError(
-              "teams",
-              `Failed to fetch file: ${response.status} ${response.statusText}`
-            );
+            const response = await fetch(url);
+            if (!response.ok) {
+              throw new NetworkError(
+                "teams",
+                `Failed to fetch file: ${response.status} ${response.statusText}`
+              );
+            }
+            const arrayBuffer = await response.arrayBuffer();
+            return Buffer.from(arrayBuffer);
           }
-          const arrayBuffer = await response.arrayBuffer();
-          return Buffer.from(arrayBuffer);
-        }
         : undefined,
     };
   }

@@ -47,10 +47,10 @@ export class BridgeHttpAdapter implements IHttpServerAdapter {
     }
 
     if (!this.handler) {
-      return new Response(
-        JSON.stringify({ error: "No handler registered" }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "No handler registered" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     const headers: Record<string, string> = {};
@@ -75,10 +75,10 @@ export class BridgeHttpAdapter implements IHttpServerAdapter {
       );
     } catch (error) {
       this.logger.error("Bridge adapter dispatch error", { error });
-      return new Response(
-        JSON.stringify({ error: "Internal error" }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "Internal error" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
     } finally {
       if (activityId) {
         this.webhookOptionsMap.delete(activityId);
@@ -86,8 +86,12 @@ export class BridgeHttpAdapter implements IHttpServerAdapter {
     }
   }
 
-  getWebhookOptions(activityId: string | undefined): WebhookOptions | undefined {
-    if (!activityId) return undefined;
+  getWebhookOptions(
+    activityId: string | undefined
+  ): WebhookOptions | undefined {
+    if (!activityId) {
+      return undefined;
+    }
     return this.webhookOptionsMap.get(activityId);
   }
 }

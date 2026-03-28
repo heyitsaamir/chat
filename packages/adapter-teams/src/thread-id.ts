@@ -14,15 +14,11 @@ export function encodeThreadId(platformData: TeamsThreadId): string {
 export function decodeThreadId(threadId: string): TeamsThreadId {
   const parts = threadId.split(":");
   if (parts.length !== 3 || parts[0] !== "teams") {
-    throw new ValidationError(
-      "teams",
-      `Invalid Teams thread ID: ${threadId}`
-    );
+    throw new ValidationError("teams", `Invalid Teams thread ID: ${threadId}`);
   }
-  const conversationId = Buffer.from(
-    parts[1] as string,
-    "base64url"
-  ).toString("utf-8");
+  const conversationId = Buffer.from(parts[1] as string, "base64url").toString(
+    "utf-8"
+  );
   const serviceUrl = Buffer.from(parts[2] as string, "base64url").toString(
     "utf-8"
   );
