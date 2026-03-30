@@ -173,7 +173,7 @@ describe("Replay Tests - Actions & Reactions", () => {
     it("should handle adaptive card action submit", async () => {
       // First subscribe via mention
       await ctx.sendWebhook(teamsFixtures.mention);
-      ctx.mockBotAdapter.clearMocks();
+      ctx.mockTeamsApp.clearMocks();
 
       // Send action payload
       await ctx.sendWebhook(teamsFixtures.action);
@@ -188,13 +188,13 @@ describe("Replay Tests - Actions & Reactions", () => {
       // Teams user ID format
       expect(capturedAction?.user.userId).toContain("29:");
 
-      expectSentMessage(ctx.mockBotAdapter, "Action received: info");
+      expectSentMessage(ctx.mockTeamsApp, "Action received: info");
     });
 
     it("should handle messageReaction event", async () => {
       // First subscribe via mention
       await ctx.sendWebhook(teamsFixtures.mention);
-      ctx.mockBotAdapter.clearMocks();
+      ctx.mockTeamsApp.clearMocks();
 
       // Send reaction event
       await ctx.sendWebhook(teamsFixtures.reaction);
@@ -210,7 +210,7 @@ describe("Replay Tests - Actions & Reactions", () => {
       // Teams user ID format
       expect(capturedReaction?.user.userId).toContain("29:");
 
-      expectSentMessage(ctx.mockBotAdapter, "Thanks for the");
+      expectSentMessage(ctx.mockTeamsApp, "Thanks for the");
     });
   });
 

@@ -394,4 +394,3 @@ export function injectMockGraphClient(
   adapterInternal.app.graph = mockClient;
   adapterInternal.graphReader.deps.graph = mockClient;
 }
-

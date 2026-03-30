@@ -525,7 +525,7 @@ describe("Replay Tests - Channel", () => {
       await channel.post("Hello from channel!");
 
       // Verify sendActivity was called via the mock bot adapter
-      expect(ctx.mockBotAdapter.sentActivities.length).toBeGreaterThan(0);
+      expect(ctx.mockTeamsApp.sentActivities.length).toBeGreaterThan(0);
     });
 
     it("should cache channel instance on thread", async () => {
