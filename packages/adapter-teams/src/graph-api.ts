@@ -92,36 +92,14 @@ export class TeamsGraphReader {
       let hasMoreMessages = false;
 
       if (direction === "forward") {
-        const allMessages: GraphMessage[] = [];
-
-        const firstPage = await this.deps.graph.call(chats.messages.list, {
+        const response = await this.deps.graph.call(chats.messages.list, {
           "chat-id": baseConversationId,
-          $top: 50,
-          $orderby: ["createdDateTime desc"],
+          $top: limit,
+          $orderby: ["createdDateTime asc"],
+          $filter: cursor ? `createdDateTime gt ${cursor}` : undefined,
         });
-        allMessages.push(...(firstPage.value || []));
-
-        let nextLink = firstPage["@odata.nextLink"] ?? undefined;
-        while (nextLink) {
-          const page = await this.graphGetNextLink<typeof firstPage>(nextLink);
-          allMessages.push(...(page.value || []));
-          nextLink = page["@odata.nextLink"] ?? undefined;
-        }
-
-        allMessages.reverse();
-
-        let startIndex = 0;
-        if (cursor) {
-          startIndex = allMessages.findIndex(
-            (msg) => msg.createdDateTime && msg.createdDateTime > cursor
-          );
-          if (startIndex === -1) {
-            startIndex = allMessages.length;
-          }
-        }
-
-        hasMoreMessages = startIndex + limit < allMessages.length;
-        graphMessages = allMessages.slice(startIndex, startIndex + limit);
+        graphMessages = (response.value || []) as GraphMessage[];
+        hasMoreMessages = graphMessages.length >= limit;
       } else {
         const response = await this.deps.graph.call(chats.messages.list, {
           "chat-id": baseConversationId,
@@ -262,36 +240,16 @@ export class TeamsGraphReader {
           hasMoreMessages = graphMessages.length >= limit;
         }
       } else if (direction === "forward") {
-        const allMessages: GraphMessage[] = [];
-        const firstPage = await this.deps.graph.call(chats.messages.list, {
+        const response = await this.deps.graph.call(chats.messages.list, {
           "chat-id": baseConversationId,
-          $top: 50,
-          $orderby: ["createdDateTime desc"],
+          $top: limit,
+          $orderby: ["createdDateTime asc"],
+          $filter: options.cursor
+            ? `createdDateTime gt ${options.cursor}`
+            : undefined,
         });
-        allMessages.push(...(firstPage.value || []));
-        let nextLink = firstPage["@odata.nextLink"] ?? undefined;
-        while (nextLink) {
-          const page = await this.graphGetNextLink<{
-            value: GraphMessage[];
-            "@odata.nextLink"?: string;
-          }>(nextLink);
-          allMessages.push(...(page.value || []));
-          nextLink = page["@odata.nextLink"] ?? undefined;
-        }
-
-        allMessages.reverse();
-        let startIndex = 0;
-        if (options.cursor) {
-          const cursorVal = options.cursor;
-          startIndex = allMessages.findIndex(
-            (msg) => msg.createdDateTime && msg.createdDateTime > cursorVal
-          );
-          if (startIndex === -1) {
-            startIndex = allMessages.length;
-          }
-        }
-        hasMoreMessages = startIndex + limit < allMessages.length;
-        graphMessages = allMessages.slice(startIndex, startIndex + limit);
+        graphMessages = (response.value || []) as GraphMessage[];
+        hasMoreMessages = graphMessages.length >= limit;
       } else {
         const response = await this.deps.graph.call(chats.messages.list, {
           "chat-id": baseConversationId,
