@@ -237,7 +237,8 @@ export function parseDialogSubmitValues(
  */
 export function modalResponseToTaskModuleResponse(
   response: ModalResponse | undefined,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+  contextId?: string
 ): Record<string, unknown> | undefined {
   if (!response) {
     return undefined;
@@ -250,7 +251,7 @@ export function modalResponseToTaskModuleResponse(
     case "update": {
       const card = modalToAdaptiveCard(
         response.modal,
-        "", // contextId not needed for update re-render
+        contextId || "",
         response.modal.callbackId
       );
       return {
@@ -275,7 +276,7 @@ export function modalResponseToTaskModuleResponse(
       );
       const card = modalToAdaptiveCard(
         response.modal,
-        "",
+        contextId || "",
         response.modal.callbackId
       );
       return {
