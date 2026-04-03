@@ -827,9 +827,9 @@ export class Chat<
    */
   processAction(
     event: Omit<ActionEvent, "thread" | "openModal"> & { adapter: Adapter },
-    options?: WebhookOptions
-  ): void {
-    const task = this.handleActionEvent(event).catch((err) => {
+    options: WebhookOptions | undefined
+  ): Promise<void> {
+    const task = this.handleActionEvent(event, options).catch((err) => {
       this.logger.error("Action processing error", {
         error: err,
         actionId: event.actionId,
@@ -840,6 +840,8 @@ export class Chat<
     if (options?.waitUntil) {
       options.waitUntil(task);
     }
+
+    return task;
   }
 
   async processModalSubmit(
@@ -927,7 +929,7 @@ export class Chat<
     },
     options?: WebhookOptions
   ): void {
-    const task = this.handleSlashCommandEvent(event).catch((err) => {
+    const task = this.handleSlashCommandEvent(event, options).catch((err) => {
       this.logger.error("Slash command processing error", {
         error: err,
         command: event.command,
@@ -1028,7 +1030,8 @@ export class Chat<
     event: Omit<SlashCommandEvent, "channel" | "openModal"> & {
       adapter: Adapter;
       channelId: string;
-    }
+    },
+    options: WebhookOptions | undefined
   ): Promise<void> {
     this.logger.debug("Incoming slash command", {
       adapter: event.adapter.name,
@@ -1051,11 +1054,12 @@ export class Chat<
       ...event,
       channel,
       openModal: async (modal) => {
-        if (!event.triggerId) {
+        // Allow if onOpenModal is provided OR triggerId exists
+        if (!(event.triggerId || options?.onOpenModal)) {
           this.logger.warn("Cannot open modal: no triggerId available");
           return undefined;
         }
-        if (!event.adapter.openModal) {
+        if (!(options?.onOpenModal || event.adapter.openModal)) {
           this.logger.warn(
             `Cannot open modal: ${event.adapter.name} does not support modals`
           );
@@ -1077,11 +1081,19 @@ export class Chat<
           undefined,
           channel
         );
-        return event.adapter.openModal(
-          event.triggerId,
-          modalElement,
-          contextId
-        );
+
+        // Use hook if provided, otherwise fall back to adapter.openModal
+        if (options?.onOpenModal) {
+          return options.onOpenModal(modalElement, contextId);
+        }
+        if (event.triggerId && event.adapter.openModal) {
+          return event.adapter.openModal(
+            event.triggerId,
+            modalElement,
+            contextId
+          );
+        }
+        return undefined;
       },
     };
     this.logger.debug("Checking slash command handlers", {
@@ -1189,7 +1201,8 @@ export class Chat<
    * Handle an action event internally.
    */
   private async handleActionEvent(
-    event: Omit<ActionEvent, "thread" | "openModal"> & { adapter: Adapter }
+    event: Omit<ActionEvent, "thread" | "openModal"> & { adapter: Adapter },
+    options: WebhookOptions | undefined
   ): Promise<void> {
     this.logger.debug("Incoming action", {
       adapter: event.adapter.name,
@@ -1237,11 +1250,12 @@ export class Chat<
       ...event,
       thread,
       openModal: async (modal) => {
-        if (!event.triggerId) {
+        // Allow if onOpenModal is provided OR triggerId exists
+        if (!(event.triggerId || options?.onOpenModal)) {
           this.logger.warn("Cannot open modal: no triggerId available");
           return undefined;
         }
-        if (!event.adapter.openModal) {
+        if (!(options?.onOpenModal || event.adapter.openModal)) {
           this.logger.warn(
             `Cannot open modal: ${event.adapter.name} does not support modals`
           );
@@ -1292,11 +1306,19 @@ export class Chat<
           message,
           channel
         );
-        return event.adapter.openModal(
-          event.triggerId,
-          modalElement,
-          contextId
-        );
+
+        // Use hook if provided, otherwise fall back to adapter.openModal
+        if (options?.onOpenModal) {
+          return options.onOpenModal(modalElement, contextId);
+        }
+        if (event.triggerId && event.adapter.openModal) {
+          return event.adapter.openModal(
+            event.triggerId,
+            modalElement,
+            contextId
+          );
+        }
+        return undefined;
       },
     };
 

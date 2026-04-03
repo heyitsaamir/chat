@@ -147,6 +147,16 @@ export interface ChatConfig<
  */
 export interface WebhookOptions {
   /**
+   * Override the default modal-opening behavior to handle it inline
+   * within the current webhook response cycle.
+   * When provided, called instead of adapter.openModal().
+   * Used by Teams to return modal content in the HTTP invoke response.
+   */
+  onOpenModal?: (
+    modal: ModalElement,
+    contextId: string
+  ) => Promise<{ viewId: string }>;
+  /**
    * Function to run message handling in the background.
    * Use this to ensure fast webhook responses while processing continues.
    *
@@ -526,8 +536,8 @@ export interface ChatInstance {
    */
   processAction(
     event: Omit<ActionEvent, "thread" | "openModal"> & { adapter: Adapter },
-    options?: WebhookOptions
-  ): void;
+    options: WebhookOptions | undefined
+  ): Promise<void>;
 
   processAppHomeOpened(
     event: AppHomeOpenedEvent,

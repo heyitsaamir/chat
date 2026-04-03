@@ -213,13 +213,20 @@ function convertActionsToElements(element: ActionsElement): ConvertResult {
 }
 
 function convertButtonToAction(button: ButtonElement): AdaptiveCardAction {
+  const data: Record<string, unknown> = {
+    actionId: button.id,
+    value: button.value,
+  };
+
+  // Add task/fetch hint for dialog-opening buttons
+  if (button.actionType === "modal") {
+    data.msteams = { type: "task/fetch" };
+  }
+
   const action: AdaptiveCardAction = {
     type: "Action.Submit",
     title: convertEmoji(button.label),
-    data: {
-      actionId: button.id,
-      value: button.value,
-    },
+    data,
   };
 
   const style = mapButtonStyle(button.style, "teams");

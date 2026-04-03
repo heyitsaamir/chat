@@ -117,11 +117,13 @@ bot.onNewMention(async (thread, message) => {
         <Button id="ephemeral">Ephemeral response</Button>
         <Button id="info">Show Info</Button>
         <Button id="choose_plan">Choose Plan</Button>
-        <Button id="feedback">Send Feedback</Button>
+        <Button actionType="modal" id="feedback">
+          Send Feedback
+        </Button>
         <Button id="messages">Fetch Messages</Button>
         <Button id="channel-post">Channel Post</Button>
         <Button id="show-table">Show Table</Button>
-        <Button id="report" value="bug">
+        <Button actionType="modal" id="report" value="bug">
           Report Bug
         </Button>
         <LinkButton url="https://vercel.com">Open Link</LinkButton>
