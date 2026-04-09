@@ -77,48 +77,7 @@ teams app view <appId> --web
 
 Open the link in your browser to install the app into a team or chat.
 
-### Managing your app
-
-```bash
-# List your apps
-teams apps
-
-# View app details
-teams app view <appId>
-
-# Update the messaging endpoint
-teams app edit <appId> --endpoint https://new-domain.com/api/webhooks/teams
-
-# Rotate client secret
-teams app auth secret create <appId>
-
-# Download the app package (.zip)
-teams app package download <appId>
-
-# Download the manifest
-teams app manifest download <appId>
-
-# Run diagnostic checks
-teams app doctor <appId>
-
-# Scaffold a local manifest.json
-teams scaffold manifest --name "My Chat Bot" --bot-id <appId> --domain your-domain.com
-```
-
-### SSO and OAuth (Azure bots)
-
-For Azure-hosted bots, the CLI can configure user authentication:
-
-```bash
-# Set up SSO (configures AAD app, OAuth connection, and manifest)
-teams app user-auth sso setup <appId>
-
-# Add an OAuth connection
-teams app user-auth oauth add <appId>
-
-# Migrate a Teams-managed bot to Azure
-teams app bot migrate <appId> --resource-group my-rg
-```
+See the [Teams CLI docs](https://heyitsaamir.github.io/teamscli/) for the full list of commands.
 
 ## Manual Azure Bot setup
 
@@ -365,27 +324,27 @@ Or add it manually to your Teams app manifest:
 
 ## Troubleshooting
 
-Run `teams app doctor <appId>` to automatically diagnose common issues with your Teams app configuration.
+Run `teams app doctor <appId>` to automatically diagnose common issues.
 
 ### "Unauthorized" error
 
 - Verify `TEAMS_APP_ID` and your chosen auth credential are correct
-- For client secret auth, check that `TEAMS_APP_PASSWORD` is valid and not expired — use `teams app auth secret create <appId>` to rotate
+- For client secret auth, check that `TEAMS_APP_PASSWORD` is valid and not expired
 - For federated auth, verify the managed identity client ID is correct and that federated credentials are configured in Azure AD
 - For SingleTenant apps, ensure `TEAMS_APP_TENANT_ID` is set
-- Check that the messaging endpoint URL is correct (`teams app view <appId>`)
+- Check that the messaging endpoint URL is correct in Azure
 
 ### Bot not appearing in Teams
 
-- Verify the Teams channel is enabled (`teams app bot status <appId>`)
+- Verify the Teams channel is enabled in Azure Bot
 - Check that the app manifest is correctly configured
-- Ensure the app is installed in the workspace/team (`teams app view <appId> --web` for install link)
+- Ensure the app is installed in the workspace/team
 
 ### Messages not received
 
-- Verify the messaging endpoint URL is correct (`teams app view <appId>`)
+- Verify the messaging endpoint URL is correct
 - Check that your server is accessible from the internet
-- Check RSC permissions with `teams app rsc list <appId>`
+- Review Azure Bot logs for errors
 
 ## License
 
