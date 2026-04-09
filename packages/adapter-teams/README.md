@@ -33,7 +33,97 @@ bot.onNewMention(async (thread, message) => {
 });
 ```
 
-## Azure Bot setup
+## Setup with Teams CLI
+
+The fastest way to get started is with the [`teams` CLI](https://heyitsaamir.github.io/teamscli/). It handles app creation, bot registration, credentials, and manifest management from the command line.
+
+### 1. Install and log in
+
+```bash
+npm install -g https://github.com/heyitsaamir/teamscli/releases/latest/download/teamscli.tgz
+teams login
+```
+
+### 2. Create app with bot
+
+```bash
+# Creates a Teams-managed app with bot and writes credentials to .env
+teams app create --name "My Chat Bot" --endpoint https://your-domain.com/api/webhooks/teams --env .env
+```
+
+This creates the app, registers the bot, and writes `TEAMS_APP_ID`, `TEAMS_APP_PASSWORD`, and `TEAMS_APP_TENANT_ID` to your `.env` file.
+
+To create an Azure-hosted bot instead (requires [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/)):
+
+```bash
+teams app create --name "My Chat Bot" --endpoint https://your-domain.com/api/webhooks/teams --azure --resource-group my-rg --env .env
+```
+
+### 3. Enable receiving all messages (optional)
+
+By default, Teams bots only receive messages when @-mentioned. To receive all messages in channels and group chats, add the RSC permission:
+
+```bash
+teams app rsc add <appId> ChannelMessage.Read.Group --type Application
+```
+
+### 4. Install in Teams
+
+View the install link for your app:
+
+```bash
+teams app view <appId> --web
+```
+
+Open the link in your browser to install the app into a team or chat.
+
+### Managing your app
+
+```bash
+# List your apps
+teams apps
+
+# View app details
+teams app view <appId>
+
+# Update the messaging endpoint
+teams app edit <appId> --endpoint https://new-domain.com/api/webhooks/teams
+
+# Rotate client secret
+teams app auth secret create <appId>
+
+# Download the app package (.zip)
+teams app package download <appId>
+
+# Download the manifest
+teams app manifest download <appId>
+
+# Run diagnostic checks
+teams app doctor <appId>
+
+# Scaffold a local manifest.json
+teams scaffold manifest --name "My Chat Bot" --bot-id <appId> --domain your-domain.com
+```
+
+### SSO and OAuth (Azure bots)
+
+For Azure-hosted bots, the CLI can configure user authentication:
+
+```bash
+# Set up SSO (configures AAD app, OAuth connection, and manifest)
+teams app user-auth sso setup <appId>
+
+# Add an OAuth connection
+teams app user-auth oauth add <appId>
+
+# Migrate a Teams-managed bot to Azure
+teams app bot migrate <appId> --resource-group my-rg
+```
+
+## Manual Azure Bot setup
+
+<details>
+<summary>Expand for manual setup via Azure Portal (alternative to CLI)</summary>
 
 ### 1. Create Azure Bot resource
 
@@ -74,7 +164,7 @@ bot.onNewMention(async (thread, message) => {
 
 ### 5. Create Teams app package
 
-Create a `manifest.json` file:
+Create a `manifest.json` file (or use `teams scaffold manifest`):
 
 ```json
 {
@@ -131,6 +221,8 @@ Create icon files (32x32 `outline.png` and 192x192 `color.png`), then zip all th
 2. Go to **Teams apps** then **Manage apps**
 3. Click **Upload new app** and select your zip file
 4. Go to **Setup policies** to control who can use the app
+
+</details>
 
 ## Configuration
 
@@ -248,7 +340,13 @@ Without these permissions, `fetchMessages` will throw a `NotImplementedError`.
 
 ### Receiving all messages
 
-By default, Teams bots only receive messages when directly @-mentioned. To receive all messages in a channel or group chat, add Resource-Specific Consent (RSC) permissions to your Teams app manifest:
+By default, Teams bots only receive messages when directly @-mentioned. To receive all messages in a channel or group chat, add the RSC permission using the CLI:
+
+```bash
+teams app rsc add <appId> ChannelMessage.Read.Group --type Application
+```
+
+Or add it manually to your Teams app manifest:
 
 ```json
 {
@@ -265,29 +363,29 @@ By default, Teams bots only receive messages when directly @-mentioned. To recei
 }
 ```
 
-Alternatively, configure the bot in Azure to receive all messages.
-
 ## Troubleshooting
+
+Run `teams app doctor <appId>` to automatically diagnose common issues with your Teams app configuration.
 
 ### "Unauthorized" error
 
 - Verify `TEAMS_APP_ID` and your chosen auth credential are correct
-- For client secret auth, check that `TEAMS_APP_PASSWORD` is valid and not expired
+- For client secret auth, check that `TEAMS_APP_PASSWORD` is valid and not expired — use `teams app auth secret create <appId>` to rotate
 - For federated auth, verify the managed identity client ID is correct and that federated credentials are configured in Azure AD
 - For SingleTenant apps, ensure `TEAMS_APP_TENANT_ID` is set
-- Check that the messaging endpoint URL is correct in Azure
+- Check that the messaging endpoint URL is correct (`teams app view <appId>`)
 
 ### Bot not appearing in Teams
 
-- Verify the Teams channel is enabled in Azure Bot
+- Verify the Teams channel is enabled (`teams app bot status <appId>`)
 - Check that the app manifest is correctly configured
-- Ensure the app is installed in the workspace/team
+- Ensure the app is installed in the workspace/team (`teams app view <appId> --web` for install link)
 
 ### Messages not received
 
-- Verify the messaging endpoint URL is correct
+- Verify the messaging endpoint URL is correct (`teams app view <appId>`)
 - Check that your server is accessible from the internet
-- Review Azure Bot logs for errors
+- Check RSC permissions with `teams app rsc list <appId>`
 
 ## License
 
