@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@chat-adapter/teams)](https://www.npmjs.com/package/@chat-adapter/teams)
 [![npm downloads](https://img.shields.io/npm/dm/@chat-adapter/teams)](https://www.npmjs.com/package/@chat-adapter/teams)
 
-Microsoft Teams adapter for [Chat SDK](https://chat-sdk.dev). Configure with Azure Bot Service.
+Microsoft Teams adapter for [Chat SDK](https://chat-sdk.dev).
 
 ## Installation
 
@@ -78,110 +78,6 @@ teams app view <appId> --web
 Open the link in your browser to install the app into a team or chat.
 
 See the [Teams CLI docs](https://heyitsaamir.github.io/teamscli/) for the full list of commands.
-
-## Manual Azure Bot setup
-
-<details>
-<summary>Expand for manual setup via Azure Portal (alternative to CLI)</summary>
-
-### 1. Create Azure Bot resource
-
-1. Go to [portal.azure.com](https://portal.azure.com)
-2. Click **Create a resource**
-3. Search for **Azure Bot** and select it
-4. Click **Create** and fill in:
-   - **Bot handle**: Unique identifier for your bot
-   - **Subscription**: Your Azure subscription
-   - **Resource group**: Create new or use existing
-   - **Pricing tier**: F0 (free) for testing
-   - **Type of App**: **Single Tenant** (recommended for enterprise)
-   - **Creation type**: **Create new Microsoft App ID**
-5. Click **Review + create** then **Create**
-
-### 2. Get app credentials
-
-1. Go to your Bot resource then **Configuration**
-2. Copy **Microsoft App ID** as `TEAMS_APP_ID`
-3. Click **Manage Password** (next to Microsoft App ID)
-4. In the App Registration page, go to **Certificates & secrets**
-5. Click **New client secret**, add description, select expiry, click **Add**
-6. Copy the **Value** immediately (shown only once) as `TEAMS_APP_PASSWORD`
-7. Go to **Overview** and copy **Directory (tenant) ID** as `TEAMS_APP_TENANT_ID`
-
-### 3. Configure messaging endpoint
-
-1. In your Azure Bot resource, go to **Configuration**
-2. Set **Messaging endpoint** to `https://your-domain.com/api/webhooks/teams`
-3. Click **Apply**
-
-### 4. Enable Teams channel
-
-1. In your Azure Bot resource, go to **Channels**
-2. Click **Microsoft Teams**
-3. Accept the terms of service
-4. Click **Apply**
-
-### 5. Create Teams app package
-
-Create a `manifest.json` file (or use `teams scaffold manifest`):
-
-```json
-{
-  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
-  "manifestVersion": "1.16",
-  "version": "1.0.0",
-  "id": "your_app_id_here",
-  "packageName": "com.yourcompany.chatbot",
-  "developer": {
-    "name": "Your Company",
-    "websiteUrl": "https://your-domain.com",
-    "privacyUrl": "https://your-domain.com/privacy",
-    "termsOfUseUrl": "https://your-domain.com/terms"
-  },
-  "name": {
-    "short": "Chat Bot",
-    "full": "Chat SDK Demo Bot"
-  },
-  "description": {
-    "short": "A chat bot powered by Chat SDK",
-    "full": "A chat bot powered by Chat SDK that responds to messages and commands."
-  },
-  "icons": {
-    "outline": "outline.png",
-    "color": "color.png"
-  },
-  "accentColor": "#FFFFFF",
-  "bots": [
-    {
-      "botId": "your_app_id_here",
-      "scopes": ["personal", "team", "groupchat"],
-      "supportsFiles": false,
-      "isNotificationOnly": false
-    }
-  ],
-  "permissions": ["identity", "messageTeamMembers"],
-  "validDomains": ["your-domain.com"]
-}
-```
-
-Create icon files (32x32 `outline.png` and 192x192 `color.png`), then zip all three files together.
-
-### 6. Upload app to Teams
-
-**For testing (sideloading):**
-
-1. In Teams, click **Apps** in the sidebar
-2. Click **Manage your apps** then **Upload an app**
-3. Click **Upload a custom app** and select your zip file
-
-**For organization-wide deployment:**
-
-1. Go to [Teams Admin Center](https://admin.teams.microsoft.com)
-2. Go to **Teams apps** then **Manage apps**
-3. Click **Upload new app** and select your zip file
-4. Go to **Setup policies** to control who can use the app
-
-</details>
 
 ## Configuration
 
