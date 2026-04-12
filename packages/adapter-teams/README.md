@@ -168,13 +168,26 @@ TEAMS_APP_TENANT_ID=...  # Required for SingleTenant apps
 
 ## Message history (`fetchMessages`)
 
-Fetching message history requires the Microsoft Graph API with client credentials flow. To enable it:
+Fetching message history requires the Microsoft Graph API with client credentials flow. The permissions needed depend on the conversation type:
 
-1. Set `appTenantId` in the adapter config (or `TEAMS_APP_TENANT_ID` env var)
-2. Grant one of these Azure AD app permissions:
-   - `ChatMessage.Read.Chat`
-   - `Chat.Read.All`
-   - `Chat.Read.WhereInstalled`
+| Context | Permission | Type |
+|---------|-----------|------|
+| Channel | `ChannelMessage.Read.Group` | RSC |
+| Group chat | `ChatMessage.Read.Chat` | RSC |
+| Personal/DM | `Chat.Read.All` | Azure AD (admin consent) |
+
+RSC permissions are added via the Teams CLI (see [setup](#setup)). For DM history, RSC is [not sufficient](https://learn.microsoft.com/en-us/microsoftteams/platform/graph-api/rsc/resource-specific-consent) — add the `Chat.Read.All` Azure AD app permission:
+
+```bash
+az ad app permission add \
+  --id <appId> \
+  --api 00000003-0000-0000-c000-000000000000 \
+  --api-permissions 6b7d71aa-70aa-4810-a8d9-5d9fb2830017=Role
+
+az ad app permission admin-consent --id <appId>
+```
+
+Set `appTenantId` in the adapter config (or `TEAMS_APP_TENANT_ID` env var) to enable tenant-scoped Graph tokens.
 
 Without these permissions, `fetchMessages` will throw a `NotImplementedError`.
 
